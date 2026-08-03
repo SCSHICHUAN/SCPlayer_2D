@@ -73,7 +73,8 @@ static int w_height = 480;
 //static SDL_Renderer *renderer = NULL;
 
 // 定义一个函数指针类型
-typedef int (*frame_call_bacl)(AVFrame *, int,void *);
+// opaque: VideoState*; userData: 调用方上下文（如 ViewController*）
+typedef int (*frame_call_bacl)(AVFrame *, int, void *opaque, void *userData);
 
 
 typedef struct MyPacketEle
@@ -186,12 +187,13 @@ typedef struct VideoState{
     
     //回调
     frame_call_bacl fn_call;
+    void *userData; // 回调透传给上层，避免全局对象指针
     
     int out_audio_size;
 }VideoState;
 
 
-int scplayer(frame_call_bacl fn_call);//同步好的视频帧
+int scplayer(frame_call_bacl fn_call, void *userData);//同步好的视频帧
 //static void sdl_event_loop(VideoState *is,int ms);
 
 /* 公共队列接口（供音视频模块使用） */

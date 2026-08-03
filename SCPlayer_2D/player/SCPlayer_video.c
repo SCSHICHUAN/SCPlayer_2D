@@ -266,7 +266,7 @@ static void video_display(VideoState *is){
       AVFrame *frame = NULL;
       vp = frame_queue_peek(&is->pictq);
       frame = vp->frame;
-      is->fn_call(frame,1,is);
+      is->fn_call(frame,1,is,is->userData);
 }
 
 //刷新视频帧

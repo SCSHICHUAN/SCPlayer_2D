@@ -354,7 +354,7 @@ int stream_component_open(VideoState *is,int stream_index){
 
          //开始播放音频
 //         SDL_PauseAudio(0);
-        is->fn_call(NULL,0,is);
+        is->fn_call(NULL,0,is,is->userData);
         break;
     case AVMEDIA_TYPE_VIDEO:
         is->video_index = stream_index;
@@ -699,7 +699,7 @@ int video_loop(void *arg){
 13. 收尾，释放资源
 */
 
-int scplayer(frame_call_bacl fn_call){
+int scplayer(frame_call_bacl fn_call, void *userData){
 
     VideoState *is;
 
@@ -708,11 +708,13 @@ int scplayer(frame_call_bacl fn_call){
 
 
     is = stream_open(input_filename);
-    is->fn_call = fn_call;
     if(!is){
         av_log(NULL,AV_LOG_FATAL,"初始化VideoState失败\n");
         do_exit(NULL);
+        return -1;
     }
+    is->fn_call = fn_call;
+    is->userData = userData;
 
     SDL_CreateThread(video_loop,"video_loop",is);
     return 0;
