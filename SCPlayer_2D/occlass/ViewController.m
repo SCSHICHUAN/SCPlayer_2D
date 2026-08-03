@@ -22,7 +22,7 @@
 //#define kWH (9/16.0)
 #include "SCPlayer.h"
 #import "SCAudioQueuePlayer.h"
-#import "OCRender.h"
+
 
 @interface ViewController ()
 @property(nonatomic,assign)BOOL end;
@@ -31,7 +31,6 @@
 @property(nonatomic,assign)NSInteger audio_pak_count;
 @property(nonatomic,strong)NSTimer *timer;
 @property(nonatomic,strong)SCRender *cRender;
-@property(nonatomic,strong)OCRender *ocRender;
 -(void)initAudio:(void *)opaque;
 @end
 
@@ -46,10 +45,11 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         });
     }else if(flag == 1){
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
-            if(success){
-                VideoState *is = (VideoState*)opaque;
-                fream_queue_pop(&is->pictq);
-            }
+            VideoState *is = (VideoState*)opaque;
+            /* 无论成功与否都出队并解除 pending，避免刷新线程卡在同一帧 */
+            fream_queue_pop(&is->pictq);
+            is->frame_display_pending = 0;
+            (void)success;
         }];
     }
     
@@ -79,7 +79,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         if (!strongSelf) {
             return;
         }
-        scplayer(when_frame_push, (__bridge void *)strongSelf);
+        scplayer("/Users/stan/Desktop/SCPlayer_2D/ffop.mp4", when_frame_push, (__bridge void *)strongSelf);
     });
     
     
@@ -104,12 +104,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
 
 
--(OCRender *)ocRender{
-    if(!_ocRender){
-        _ocRender = [[OCRender alloc] initWithFrame:self.view.bounds];
-    }
-    return _ocRender;
-}
+
 
 -(SCRender *)cRender{
     if(!_cRender){

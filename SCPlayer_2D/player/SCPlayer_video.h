@@ -11,7 +11,7 @@
 
 #include "SCPlayer.h"
 
-int video_decode_thread(void *arg);
+void *video_decode_thread(void *arg);
 void video_refresh_timer(void *userdata);
 double get_video_clock(VideoState *is);
 

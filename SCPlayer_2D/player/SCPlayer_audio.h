@@ -14,7 +14,9 @@
 int audio_open(void *opaque,
                AVChannelLayout *wanted_channel_layout,
                int wented_salple_rate);
-void sdl_audio_callback_1(void *userdata, uint8_t *stream, int len);
+void audio_decode_callback(void *userdata, uint8_t *stream, int len);
+void audio_queue_wrote(VideoState *is, int bytes);
+void audio_queue_consumed(VideoState *is, int bytes);
 double get_audio_clock(VideoState *is);
 
 #endif /* SCPlayer_audio_h */

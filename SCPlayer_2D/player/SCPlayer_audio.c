@@ -90,8 +90,8 @@ static int audio_decode_frame(VideoState *is)
                                    in,
                                    in_count);
                 // data_size = （len2）采样个数 x （nb_channels）音频通道数 x 位深
-                printf("len2=%d, nb_channels=%d, bytes_per_sample=%d\n",len2,is->audio_frame.ch_layout.nb_channels,
-                       av_get_bytes_per_sample(AV_SAMPLE_FMT_S16));
+//                printf("len2=%d, nb_channels=%d, bytes_per_sample=%d\n",len2,is->audio_frame.ch_layout.nb_channels,
+//                       av_get_bytes_per_sample(AV_SAMPLE_FMT_S16));
                 data_size = len2 * is->audio_frame.ch_layout.nb_channels * av_get_bytes_per_sample(AV_SAMPLE_FMT_S16);
             }else{
                 // 不需要采样
@@ -102,18 +102,16 @@ static int audio_decode_frame(VideoState *is)
                                                        is->audio_frame.format,
                                                        1);
             }          
-            //计算音频已经播放的时间
+            // audio_clock = 本帧结束时刻（ms）；当前播放点再扣未播完字节
             if(!isnan(is->audio_frame.pts)){
-                /*
-                is->audio_clock = pts + 帧的持续时间 （先加进来在减）
-                当前播放调时刻  =  is->audio_clock - 音频帧剩余数据/bytes_per_sec
-                 */
-                is->audio_clock = is->audio_frame.pts * av_q2d(is->audio_st->time_base)
-                                  + is->audio_frame.nb_samples / is->audio_frame.sample_rate;
+                is->audio_clock = sc_ts_to_ms(is->audio_frame.pts, is->audio_st->time_base)
+                                  + sc_sec_to_ms((double)is->audio_frame.nb_samples / is->audio_frame.sample_rate);
             }else{
                 is->audio_clock = NAN;
             }
-           
+            is->audio_buf_size = (unsigned int)FFMAX(data_size, 0);
+            is->audio_buf_index = 0; /* 尚未交给 AudioQueue */
+
             //清空
             av_packet_unref(&is->audio_pkt);
             av_frame_unref(&is->audio_frame);
@@ -124,18 +122,36 @@ __OUT:
     return ret;
 }
 
-/*
-  len 声卡需要的音频长度
-  实际可能不能给len
- */
-void sdl_audio_callback_1(void *userdata, uint8_t *stream, int len)
+/* 解码一帧 PCM 到 is->audio_buf；enqueue 后由上层推进游标 / aq_size */
+void audio_decode_callback(void *userdata, uint8_t *stream, int len)
 {
     VideoState *is = (VideoState *)userdata;
+    (void)stream;
+    (void)len;
     is->out_audio_size = audio_decode_frame(is);
-    
-    //每次声卡要的数据
-    len = is->out_audio_size;
-    is->audio_buf_index = is->out_audio_size;
+}
+
+/* 整帧已写入 AudioQueue：软件缓冲视为交出去，并累加硬件队列字节 */
+void audio_queue_wrote(VideoState *is, int bytes)
+{
+    if (!is || bytes <= 0) {
+        return;
+    }
+    is->audio_buf_index = is->audio_buf_size;
+    is->audio_aq_size += (unsigned int)bytes;
+}
+
+/* 某块 AudioQueue buffer 播完回收：从硬件队列字节中扣掉 */
+void audio_queue_consumed(VideoState *is, int bytes)
+{
+    if (!is || bytes <= 0) {
+        return;
+    }
+    if (is->audio_aq_size >= (unsigned int)bytes) {
+        is->audio_aq_size -= (unsigned int)bytes;
+    } else {
+        is->audio_aq_size = 0;
+    }
 }
 
 
@@ -155,7 +171,7 @@ int audio_open(void *opaque,
       为音频设备设置参数
     */
     wanted_spec.freq = wented_salple_rate; // 采样率
-    wanted_spec.format = AUDIO_S16SYS;    // 有符号的16位
+    wanted_spec.format = AV_SAMPLE_FMT_S16; // 有符号的16位
     wanted_spec.channels = wanted_nb_channels;
     wanted_spec.silence = 0;                 // 静默音
     wanted_spec.samples = AUDIO_BUFFER_SIZE; // 采样个数
@@ -164,7 +180,7 @@ int audio_open(void *opaque,
 
     av_log(NULL,AV_LOG_INFO,
            "wanted spec: channels:%d,sample_fmt:%d,sanple_ret:%d \n",
-           wanted_nb_channels,AUDIO_S16,wented_salple_rate);
+           wanted_nb_channels,AV_SAMPLE_FMT_S16,wented_salple_rate);
 
 //    if (SDL_OpenAudio(&wanted_spec, &spec) < 0){
 //        av_log(NULL, AV_LOG_ERROR, "打开音频设备失败!\n");
@@ -176,21 +192,39 @@ int audio_open(void *opaque,
     return 0;
 }
 
-//音频的clock
+static int audio_bytes_per_sec(VideoState *is)
+{
+    if (!is->audio_ctx) {
+        return 0;
+    }
+    /* 输出 PCM 为 S16 interleaved */
+    return is->audio_ctx->sample_rate * is->audio_ctx->ch_layout.nb_channels * 2;
+}
+
+/* 当前音频播放时刻（ms）= 最近一帧结束 pts − 软件未交出 − AudioQueue 未播完 */
 double get_audio_clock(VideoState *is){
     double pts;
-    int hw_buf_size,bytes_per_sec,n;
+    int bytes_per_sec;
+    int bytes_left;
 
-    pts = is->audio_clock;/* maintained in the audio thread 在音频线程中维护*/
-    hw_buf_size = is->audio_buf_size - is->audio_buf_index;// 当前缓冲区数据还剩余的
-    bytes_per_sec = 0;
-    n = is->audio_ctx->ch_layout.nb_channels * 2;//每个音频样本占用2个字节（通常是16位，等于2字节）。
-    if(is->audio_st){
-        bytes_per_sec = is->audio_ctx->sample_rate * n;//44100 * 4;采样率 x 字节数 = 每秒的字节数
+    pts = is->audio_clock;
+    if (isnan(pts)) {
+        return 0;
     }
-    if(bytes_per_sec){
-        //当前剩余的pts
-        pts -= (double)hw_buf_size / bytes_per_sec;//时间pts = 缓冲的bytes/(每秒多少bytes)
+
+    bytes_per_sec = audio_bytes_per_sec(is);
+    if (!bytes_per_sec) {
+        return pts;
+    }
+
+    bytes_left = 0;
+    if (is->audio_buf_size > is->audio_buf_index) {
+        bytes_left += (int)(is->audio_buf_size - is->audio_buf_index);
+    }
+    bytes_left += (int)is->audio_aq_size;
+
+    if (bytes_left > 0) {
+        pts -= sc_sec_to_ms((double)bytes_left / bytes_per_sec);
     }
     return pts;
 }

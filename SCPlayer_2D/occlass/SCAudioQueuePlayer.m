@@ -48,47 +48,32 @@ SCAudioQueuePlayer *sc_self;
     VideoState *is;
 }
 
-// AudioQueue回调函数
+// AudioQueue回调：buffer 播完回收后再填下一帧
 void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
     
     SCAudioQueuePlayer *scp = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
     VideoState *is = scp->is;
-    if (is->audioq.nb_packets <= 0) {
+    if (!is || is->audioq.nb_packets <= 0) {
+        return;
+    }
+
+    /* 本 buffer 刚播完，从硬件队列字节里扣掉上次写入的长度 */
+    audio_queue_consumed(is, (int)inBuffer->mAudioDataByteSize);
+    
+    audio_decode_callback(is,NULL,0);
+    int buff_size = is->out_audio_size;
+    if(!is->audio_buf || buff_size <= 0) {
+        if (buff_size <= 0) {
+            AudioQueueStop(inAQ, false);
+            NSLog(@"音频播放结束");
+        }
         return;
     }
     
-    sdl_audio_callback_1(is,NULL,0);
-    int buff_size = is->out_audio_size;
-    if(!is->audio_buf) return;
-    
-    
-    inBuffer->mAudioDataByteSize = buff_size;
+    inBuffer->mAudioDataByteSize = (UInt32)buff_size;
     memcpy(inBuffer->mAudioData, is->audio_buf, inBuffer->mAudioDataByteSize);
     AudioQueueEnqueueBuffer(scp->audioQueue, inBuffer, 0, NULL);
-    
-//    printf("buff_size:%d \n",buff_size);
-    
-    
-    if(buff_size <=0) {
-        // 如果文件读取结束，停止播放
-        AudioQueueStop(inAQ, false);
-        //        vc->audioQueueStarted = NO;
-        NSLog(@"音频播放结束");
-    }
-    
-    
-    //    memcpy(inBuffer->mAudioData,is->audio_buf, 4096);
-    //
-    //    printf("bytesRead:%d \n",is->audio_buf_size);
-    //    if (is->audio_buf_size > 0) {
-    //        inBuffer->mAudioDataByteSize = 4096;
-    //        AudioQueueEnqueueBuffer(inAQ, inBuffer, 0, NULL);
-    //    } else {
-    //        // 如果文件读取结束，停止播放
-    //        AudioQueueStop(inAQ, false);
-    ////        vc->audioQueueStarted = NO;
-    //        NSLog(@"音频播放结束");
-    //    }
+    audio_queue_wrote(is, buff_size);
 }
 
 

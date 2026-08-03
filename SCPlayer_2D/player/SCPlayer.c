@@ -49,15 +49,14 @@ static int packet_queue_init(PacketQueue *q)
         return AVERROR(ENOMEM);
     }
 
-    q->mutex = SDL_CreateMutex();
-    if (!q->mutex)
+    if (pthread_mutex_init(&q->mutex, NULL) != 0)
     {
         return AVERROR(ENOMEM);
     }
 
-    q->cond = SDL_CreateCond();
-    if (!q->cond)
+    if (pthread_cond_init(&q->cond, NULL) != 0)
     {
+        pthread_mutex_destroy(&q->mutex);
         return AVERROR(ENOMEM);
     }
     return 0;
@@ -67,7 +66,7 @@ static void packet_queue_flush(PacketQueue *q)
 {
     MyPacketEle mypkt;
 
-    SDL_LockMutex(q->mutex);
+    pthread_mutex_lock(&q->mutex);
     while (av_fifo_read(q->pkts, &mypkt, 1) > 0)
     {
         av_packet_free(&mypkt.pkt);
@@ -76,15 +75,15 @@ static void packet_queue_flush(PacketQueue *q)
     q->size = 0;
     q->duration = 0;
 
-    SDL_UnlockMutex(q->mutex);
+    pthread_mutex_unlock(&q->mutex);
 }
 // 销毁队列
 static void packet_queue_destroy(PacketQueue *q)
 {
     packet_queue_flush(q);
     av_fifo_freep2(&q->pkts);
-    SDL_DestroyMutex(q->mutex);
-    SDL_DestroyCond(q->cond);
+    pthread_mutex_destroy(&q->mutex);
+    pthread_cond_destroy(&q->cond);
 }
 
 
@@ -107,7 +106,7 @@ static int packet_queue_put_priv(PacketQueue *q, AVPacket *pkt)
     q->size += mypkt.pkt->size + sizeof(mypkt); // 队列的size
     q->duration += mypkt.pkt->duration;         // 队列总时长
 
-    SDL_CondSignal(q->cond); // 告诉等待线程
+    pthread_cond_signal(&q->cond); // 告诉等待线程
 
     return 0;
 }
@@ -128,9 +127,9 @@ int packet_queue_put(PacketQueue *q, AVPacket *pkt)
     // pkt的所有内容和值和引用技术给pkt1 后pkt恢复到原始状态
     av_packet_move_ref(pkt1, pkt);
 
-    SDL_LockMutex(q->mutex);
+    pthread_mutex_lock(&q->mutex);
     ret = packet_queue_put_priv(q, pkt1);
-    SDL_UnlockMutex(q->mutex);
+    pthread_mutex_unlock(&q->mutex);
 
     if (ret < 0)
     {
@@ -146,7 +145,7 @@ int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block)
     int ret;
     MyPacketEle mypkt;
 
-    SDL_LockMutex(q->mutex);
+    pthread_mutex_lock(&q->mutex);
     for (;;) {
         if (av_fifo_read(q->pkts, &mypkt, 1) >= 0) {
             q->nb_packets--;
@@ -160,10 +159,10 @@ int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block)
             ret = 0;
             break;
         } else {
-            SDL_CondWait(q->cond, q->mutex); // 阻塞等待
+            pthread_cond_wait(&q->cond, &q->mutex); // 阻塞等待
         }
     }
-    SDL_UnlockMutex(q->mutex);
+    pthread_mutex_unlock(&q->mutex);
     return ret;
 }
 
@@ -181,12 +180,13 @@ static int frame_queue_init(FrameQueue *fq){
     /*
      初始化线程标志
      */
-    if(!(fq->mutex = SDL_CreateMutex())){
-        av_log(NULL,AV_LOG_FATAL,"SDL_CreateMutex()\n");
+    if(pthread_mutex_init(&fq->mutex, NULL) != 0){
+        av_log(NULL,AV_LOG_FATAL,"pthread_mutex_init()\n");
         return AVERROR(ENOMEM);
     }
-    if(!(fq->cond = SDL_CreateCond())){
-        av_log(NULL,AV_LOG_FATAL,"SDL_CreateCond()\n");
+    if(pthread_cond_init(&fq->cond, NULL) != 0){
+        av_log(NULL,AV_LOG_FATAL,"pthread_cond_init()\n");
+        pthread_mutex_destroy(&fq->mutex);
         return AVERROR(ENOMEM);
     }
     /*
@@ -211,17 +211,17 @@ static void frame_queue_destory(FrameQueue *fq){
         */
        av_frame_free(&vp->frame);
        //销毁现在变量标志
-       SDL_DestroyMutex(fq->mutex);
-       SDL_DestroyCond(fq->cond);
+       pthread_mutex_destroy(&fq->mutex);
+       pthread_cond_destroy(&fq->cond);
     }
         
 }
 //帧队列终止
 static void frame_queue_abort(FrameQueue *fq){
-    SDL_LockMutex(fq->mutex);
+    pthread_mutex_lock(&fq->mutex);
     fq->abort = 1;
-    SDL_CondSignal(fq->cond);
-    SDL_UnlockMutex(fq->mutex);
+    pthread_cond_signal(&fq->cond);
+    pthread_mutex_unlock(&fq->mutex);
 }
 //唤醒等待的线程
 static void frame_queue_signal(FrameQueue *fq){
@@ -229,9 +229,9 @@ static void frame_queue_signal(FrameQueue *fq){
     唤醒等待在条件变量 fq->cond 上的一个线程。
     如果有多个线程在等待这个条件变量，那么只有一个线程会被唤醒。
     */
-    SDL_LockMutex(fq->mutex);
-    SDL_CondSignal(fq->cond);
-    SDL_UnlockMutex(fq->mutex);
+    pthread_mutex_lock(&fq->mutex);
+    pthread_cond_signal(&fq->cond);
+    pthread_mutex_unlock(&fq->mutex);
 }
 
 /*
@@ -239,7 +239,7 @@ static void frame_queue_signal(FrameQueue *fq){
 */
 //fq_1.获取当前写视频帧位置0，当前可储存AVFrame 的Frame
 Frame *frame_queue_peek_writable(FrameQueue *fq){
-    SDL_LockMutex(fq->mutex);
+    pthread_mutex_lock(&fq->mutex);
     /*
     生产没有消费完，等待消费，Frame queue没有处理消费，
     因为一般在播放器中，生产>消费，不用担心消费过快
@@ -247,9 +247,9 @@ Frame *frame_queue_peek_writable(FrameQueue *fq){
     2.我看在ffplay中是考虑了一下这个情况 加了 frame_queue_peek_readable() 函数
     */
    while(fq->size >= VIDEO_PICTURE_QUEUE_SIZE && !fq->abort){
-        SDL_CondWait(fq->cond,fq->mutex);//生产过剩 等待消费 等待队列有空间插入新帧
+        pthread_cond_wait(&fq->cond,&fq->mutex);//生产过剩 等待消费 等待队列有空间插入新帧
    }
-   SDL_UnlockMutex(fq->mutex);
+   pthread_mutex_unlock(&fq->mutex);
 
    if(fq->abort)
       return NULL;
@@ -260,10 +260,10 @@ Frame *frame_queue_peek_writable(FrameQueue *fq){
 void frame_queue_push(FrameQueue *fq){
     if(++fq->windex >= VIDEO_PICTURE_QUEUE_SIZE)
         fq->windex = 0;
-    SDL_LockMutex(fq->mutex);
+    pthread_mutex_lock(&fq->mutex);
     fq->size++;
-    SDL_CondSignal(fq->cond);//生产一个，发送消息给，等待消费的(本节中没有等待消费处理)
-    SDL_UnlockMutex(fq->mutex);
+    pthread_cond_signal(&fq->cond);//生产一个，发送消息给，等待消费的(本节中没有等待消费处理)
+    pthread_mutex_unlock(&fq->mutex);
 }
 /*
   渲染线程调用
@@ -278,10 +278,10 @@ void fream_queue_pop(FrameQueue *fq){
     av_frame_unref(vp->frame);//结构中引用的所有数据
     if(++fq->rindex >= VIDEO_PICTURE_QUEUE_SIZE)
        fq->rindex = 0;
-    SDL_LockMutex(fq->mutex);
+    pthread_mutex_lock(&fq->mutex);
     fq->size--;
-    SDL_CondSignal(fq->cond);//消费了一个，发出同步消息，给生产，如果生产在等待可以开始工作了
-    SDL_UnlockMutex(fq->mutex);
+    pthread_cond_signal(&fq->cond);//消费了一个，发出同步消息，给生产，如果生产在等待可以开始工作了
+    pthread_mutex_unlock(&fq->mutex);
 }
 
 int stream_component_open(VideoState *is,int stream_index){
@@ -348,6 +348,7 @@ int stream_component_open(VideoState *is,int stream_index){
 
          is->audio_buf_size = 0;
          is->audio_buf_index = 0;
+         is->audio_aq_size = 0;
          is->audio_st = st;
          is->audio_index = stream_index;
          is->audio_ctx = avctx;
@@ -361,11 +362,19 @@ int stream_component_open(VideoState *is,int stream_index){
         is->video_st = st;
         is->video_ctx = avctx;
 
-        is->frame_timer = (double)av_gettime() / ch_µs_to_s;//第一帧视频播放的时刻，加一个delay就是第二帧，加第二哥delay就是下一帧，以此类推
-        is->frame_last_delay = 40e-3;//上一次渲染delay时间
-        is->video_current_pts_time = av_gettime();//当前pts的系统时间
+        is->frame_timer = sc_gettime_ms();//第一帧视频播放的墙钟时刻（ms）
+        /* 帧间隔由流 fps 计算；拿不到则 SC_DEFAULT_FRAME_DURATION_MS(40ms≈25fps) */
+        is->frame_duration = sc_frame_duration_from_stream(is->ic, st);
+        is->frame_last_delay = is->frame_duration;
+        is->frame_display_pending = 0;
+        is->video_current_pts_time = sc_gettime_ms();//记下 pts 时的墙钟（ms）
+        av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms\n", is->frame_duration);
 
-        is->decode_tid = SDL_CreateThread(video_decode_thread,"video_decode_thread",is);
+        if(pthread_create(&is->decode_tid, NULL, video_decode_thread, is) != 0){
+            av_log(NULL,AV_LOG_FATAL,"pthread_create(video_decode_thread)\n");
+            goto __ERROR;
+         }
+         is->has_decode_tid = 1;
         break;
     case AVMEDIA_TYPE_UNKNOWN:
        av_log(avctx,AV_LOG_ERROR,"Other media type unknow - media_type = %d\n",avctx->codec_type);
@@ -375,8 +384,6 @@ int stream_component_open(VideoState *is,int stream_index){
         break;
     }
 
-   
-   
     
   ret = 0;
   goto __END;
@@ -389,7 +396,7 @@ __END:
 }
 
 //=========================== 网络中读取音视频包保存到音视频包队列中 ===========================
-int read_thread(void *arg){
+void *read_thread(void *arg){
 //    Uint32 pixformat;
     int ret = -1;
     int video_index  = -1;
@@ -444,17 +451,7 @@ int read_thread(void *arg){
     stream_component_open(is,audio_index);
   }
   if(video_index >= 0 ){
-     //如果显示帧的显示区域大于期望的区域，就等于期望的区域
-//     if (codecpar->width){
-//       if(codecpar->width <= default_width && codecpar->height <= default_height){
-//          set_default_window_size(codecpar->width, codecpar->height, sar);
-//       }else{
-//          set_default_window_size(default_width, default_height, sar);
-//       }
-//    }else{
-//      set_default_window_size(default_width, default_height, sar);
-//    }
-
+    
      //打开视频流
     stream_component_open(is, video_index);
    }
@@ -470,11 +467,11 @@ int read_thread(void *arg){
         //没有消费完循环等待10ms，queue满了
 //        if(is->audioq.size > MAX_QUEUE_SIZE ||
 //           is->videoq.size > MAX_QUEUE_SIZE){
-//            SDL_Delay(10);
+//            sc_delay_ms(10);
 //            continue;
 //           }
 //              if(is->videoq.size > MAX_QUEUE_SIZE){
-//                  SDL_Delay(10);
+//                  sc_delay_ms(10);
 //                  continue;
 //                 }
         //从上下文中读取包
@@ -484,7 +481,7 @@ int read_thread(void *arg){
                 /*
                 如果还没有读取到包，等100毫秒在读
                 */
-                SDL_Delay(100);
+                sc_delay_ms(100);
                 continue;
             }else{
                 break;
@@ -503,7 +500,7 @@ int read_thread(void *arg){
 
   /* all done - wait for it 如果读取完了 等待100ms*/
    while (!is->quit){
-        SDL_Delay(100);
+        sc_delay_ms(100);
     }
 
 
@@ -512,13 +509,8 @@ __ERROR:
         av_packet_free(&pkt);
     }
     if(ret !=0 ){
-//    SDL_Event event;
-//    event.type = FF_QUIT_EVENT;
-//    event.user.data1 = is;
-//    SDL_PushEvent(&event);
   }
-
-  return ret;
+  return (void *)(intptr_t)ret;
 }
 
 static void stream_component_close(VideoState *is, int stream_index){
@@ -540,8 +532,10 @@ static void stream_component_close(VideoState *is, int stream_index){
   case AVMEDIA_TYPE_VIDEO:
     frame_queue_abort(&is->pictq);
     frame_queue_signal(&is->pictq); //可以确保所有等待的线程都被唤醒
-    SDL_WaitThread(is->decode_tid, NULL);
-    is->decode_tid = NULL;
+    if(is->has_decode_tid){
+      pthread_join(is->decode_tid, NULL);
+      is->has_decode_tid = 0;
+    }
       break;
   default:
       break;
@@ -549,7 +543,10 @@ static void stream_component_close(VideoState *is, int stream_index){
 }
 
 static void stream_close(VideoState *is){
-    SDL_WaitThread(is->read_tid, NULL);
+    if(is->has_read_tid){
+        pthread_join(is->read_tid, NULL);
+        is->has_read_tid = 0;
+    }
 
     /* close each stream */
     if (is->audio_index >= 0)
@@ -558,24 +555,11 @@ static void stream_close(VideoState *is){
         stream_component_close(is, is->video_index);
 
     avformat_close_input(&is->ic);
-
     packet_queue_destroy(&is->videoq);
     packet_queue_destroy(&is->audioq);
-
     frame_queue_destory(&is->pictq);
-
     av_free(is->filename);
-//    if(is->texture)
-//        SDL_DestroyTexture(is->texture);
     av_free(is);
-}
-//添加定时事件
-//    SDL_Event event;
-//    event.type = FF_REFRESH_EVENT;
-//    event.user.data1 = opaque;
-//    SDL_PushEvent(&event);
-void schedule_refresh(VideoState *is,int delay){
-//    SDL_AddTimer(delay,sdl_refresh_timer_cb,is);
 }
 
 static VideoState *stream_open(const char* filename){
@@ -609,24 +593,23 @@ static VideoState *stream_open(const char* filename){
    }
 
    is->av_sync_type = av_sync_type;
-   is->read_tid = SDL_CreateThread(read_thread,"read_thread",is);
-   if(!is->read_tid){
-      av_log(NULL,AV_LOG_FATAL,"SDL_CreateThread()\n");
+   if(pthread_create(&is->read_tid, NULL, read_thread, is) != 0){
+      av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
       goto __ERROR;
    }
-
-   schedule_refresh(is,40);//开始刷新视频帧 开是40ms一次
+   is->has_read_tid = 1;
    
    return is;
 __ERROR:
   stream_close(is);
   return NULL;
 }
-//系统时间 外界对其时间
+//系统时间 / 外部时钟（ms）
 double get_external_clock(void){
-    return av_gettime()/ch_µs_to_s;
+    return sc_gettime_ms();
 }
 
+//当前音频播放的时刻
 double get_maste_clock(VideoState *is){
     if(is->av_sync_type == AV_SYNC_AUDIO_MASTER){
         return get_audio_clock(is);
@@ -641,44 +624,23 @@ static void do_exit(VideoState *is){
     if(is){
         stream_close(is);
     }
-//    if(renderer)
-//       SDL_DestroyRenderer(renderer);
-//    if(win)
-//       SDL_DestroyWindow(win);
-//    SDL_Quit();
     av_log(NULL,AV_LOG_QUIET,"%s","");
 }
 
 
-static void sdl_event_loop(VideoState *is){
-//    SDL_Event event;
-//    for(;;){
-//        SDL_WaitEvent(&event);
-//        switch(event.type){
-//            case FF_QUIT_EVENT:
-//            case SDL_QUIT:
-//            is->quit = 1;
-//            do_exit(is);
-//            break;
-//            case FF_REFRESH_EVENT:
-//            video_refresh_timer(event.user.data1);
-//            break;
-//            default:
-//            break;
-//        }
-//    }
+static void video_refresh_loop(VideoState *is){
     for(;;){
         video_refresh_timer(is);
-        SDL_Delay(is->delay_video_time);
+        sc_delay_ms(is->delay_video_time);// 控制渲染视频帧的节奏
     }
     
 }
 
 
-int video_loop(void *arg){
+void *video_loop(void *arg){
     VideoState *is = (VideoState*)arg;
-    sdl_event_loop(is);
-    return 0;
+    video_refresh_loop(is);
+    return NULL;
 }
 
 /*
@@ -699,15 +661,18 @@ int video_loop(void *arg){
 13. 收尾，释放资源
 */
 
-int scplayer(frame_call_bacl fn_call, void *userData){
+int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
 
     VideoState *is;
 
     av_log_set_level(AV_LOG_INFO);
-    input_filename = "/Users/stan/Desktop/SCPlayer_2D/ffop.mp4";
 
+    if(!filename || !filename[0]){
+        av_log(NULL,AV_LOG_FATAL,"filename is empty\n");
+        return -1;
+    }
 
-    is = stream_open(input_filename);
+    is = stream_open(filename);
     if(!is){
         av_log(NULL,AV_LOG_FATAL,"初始化VideoState失败\n");
         do_exit(NULL);
@@ -716,7 +681,16 @@ int scplayer(frame_call_bacl fn_call, void *userData){
     is->fn_call = fn_call;
     is->userData = userData;
 
-    SDL_CreateThread(video_loop,"video_loop",is);
+    {
+        pthread_t video_loop_tid;
+        if(pthread_create(&video_loop_tid, NULL, video_loop, is) == 0){
+            pthread_detach(video_loop_tid);
+        } else {
+            av_log(NULL,AV_LOG_FATAL,"pthread_create(video_loop)\n");
+            do_exit(is);
+            return -1;
+        }
+    }
     return 0;
 }
 /*

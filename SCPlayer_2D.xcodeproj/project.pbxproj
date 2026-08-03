@@ -44,26 +44,11 @@
 		F692D1243020516600BFA21B /* SCPlayer_audio.c in Sources */ = {isa = PBXBuildFile; fileRef = F692D1233020516600BFA21B /* SCPlayer_audio.c */; };
 		F69FEC8E2C3BEB7B00ACFC92 /* SCPlayer.c in Sources */ = {isa = PBXBuildFile; fileRef = F69FEC8D2C3BEB7B00ACFC92 /* SCPlayer.c */; };
 		F69FECEA2C3F878700ACFC92 /* SCAudioQueuePlayer.m in Sources */ = {isa = PBXBuildFile; fileRef = F69FECE92C3F878700ACFC92 /* SCAudioQueuePlayer.m */; };
-		F6C531422E9E0E7700250CAB /* SDL2.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F69FEC972C3D07C500ACFC92 /* SDL2.framework */; };
-		F6C531432E9E0E7700250CAB /* SDL2.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F69FEC972C3D07C500ACFC92 /* SDL2.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		F6C7552D2C5CC2BD006EFCDF /* OCRender.m in Sources */ = {isa = PBXBuildFile; fileRef = F6C7552C2C5CC2BD006EFCDF /* OCRender.m */; };
 		F6C7552F2C5CCE23006EFCDF /* fragmentShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C7552E2C5CCE23006EFCDF /* fragmentShader.glsl */; };
 		F6C755312C5CCE2C006EFCDF /* vertexShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C755302C5CCE2C006EFCDF /* vertexShader.glsl */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		F6C531442E9E0E7700250CAB /* Embed Frameworks */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				F6C531432E9E0E7700250CAB /* SDL2.framework in Embed Frameworks */,
-			);
-			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		8B076F56228FE85200ACCD47 /* SCPlayer_2D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SCPlayer_2D.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -116,8 +101,6 @@
 		F692D1233020516600BFA21B /* SCPlayer_audio.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer_audio.c; sourceTree = "<group>"; };
 		F69FEC8C2C3BEB7B00ACFC92 /* SCPlayer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer.h; sourceTree = "<group>"; };
 		F69FEC8D2C3BEB7B00ACFC92 /* SCPlayer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer.c; sourceTree = "<group>"; };
-		F69FEC972C3D07C500ACFC92 /* SDL2.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SDL2.framework; sourceTree = "<group>"; };
-		F69FECE52C3D3A9D00ACFC92 /* SCSDL.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SCSDL.h; sourceTree = "<group>"; };
 		F69FECE82C3F878700ACFC92 /* SCAudioQueuePlayer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCAudioQueuePlayer.h; sourceTree = "<group>"; };
 		F69FECE92C3F878700ACFC92 /* SCAudioQueuePlayer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCAudioQueuePlayer.m; sourceTree = "<group>"; };
 		F69FECEB2C3F887A00ACFC92 /* FFAudioInformation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FFAudioInformation.h; sourceTree = "<group>"; };
@@ -140,7 +123,6 @@
 				8B076F95228FECB200ACCD47 /* libswresample.a in Frameworks */,
 				8B076F96228FECB200ACCD47 /* libavcodec.a in Frameworks */,
 				8B076F97228FECB200ACCD47 /* libavfilter.a in Frameworks */,
-				F6C531422E9E0E7700250CAB /* SDL2.framework in Frameworks */,
 				8B076F81228FE9A400ACCD47 /* CoreGraphics.framework in Frameworks */,
 				8B076F85228FE9A400ACCD47 /* libz.tbd in Frameworks */,
 				8B076F87228FE9A400ACCD47 /* VideoToolbox.framework in Frameworks */,
@@ -328,8 +310,6 @@
 		F69FEC952C3CE19D00ACFC92 /* libs */ = {
 			isa = PBXGroup;
 			children = (
-				F69FECE52C3D3A9D00ACFC92 /* SCSDL.h */,
-				F69FEC972C3D07C500ACFC92 /* SDL2.framework */,
 				F68807FA2B58394800BC579B /* jpeg */,
 				8B076F6F228FE8D700ACCD47 /* ffmpeglib */,
 			);
@@ -346,7 +326,6 @@
 				8B076F52228FE85200ACCD47 /* Sources */,
 				8B076F53228FE85200ACCD47 /* Frameworks */,
 				8B076F54228FE85200ACCD47 /* Resources */,
-				F6C531442E9E0E7700250CAB /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
