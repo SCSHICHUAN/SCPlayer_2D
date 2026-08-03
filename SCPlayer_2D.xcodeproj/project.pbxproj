@@ -18,6 +18,7 @@
 		8B076F7E228FE9A400ACCD47 /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B076F72228FE9A300ACCD47 /* CoreImage.framework */; };
 		8B076F7F228FE9A400ACCD47 /* include in Resources */ = {isa = PBXBuildFile; fileRef = 8B076F73228FE9A300ACCD47 /* include */; };
 		8B076F80228FE9A400ACCD47 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B076F74228FE9A300ACCD47 /* AVFoundation.framework */; };
+		F6A1PHOTOS0120515400BFA21B /* PhotosUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F6A1PHOTOS0220515400BFA21B /* PhotosUI.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 		8B076F81228FE9A400ACCD47 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B076F75228FE9A300ACCD47 /* CoreGraphics.framework */; };
 		8B076F82228FE9A400ACCD47 /* libbz2.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B076F76228FE9A300ACCD47 /* libbz2.tbd */; };
 		8B076F83228FE9A400ACCD47 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B076F77228FE9A400ACCD47 /* AudioToolbox.framework */; };
@@ -66,6 +67,7 @@
 		8B076F72228FE9A300ACCD47 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = System/Library/Frameworks/CoreImage.framework; sourceTree = SDKROOT; };
 		8B076F73228FE9A300ACCD47 /* include */ = {isa = PBXFileReference; lastKnownFileType = folder; path = include; sourceTree = "<group>"; };
 		8B076F74228FE9A300ACCD47 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		F6A1PHOTOS0220515400BFA21B /* PhotosUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = PhotosUI.framework; path = System/Library/Frameworks/PhotosUI.framework; sourceTree = SDKROOT; };
 		8B076F75228FE9A300ACCD47 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		8B076F76228FE9A300ACCD47 /* libbz2.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libbz2.tbd; path = usr/lib/libbz2.tbd; sourceTree = SDKROOT; };
 		8B076F77228FE9A400ACCD47 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
@@ -131,6 +133,7 @@
 				8B076F7C228FE9A400ACCD47 /* libiconv.tbd in Frameworks */,
 				8B076F7E228FE9A400ACCD47 /* CoreImage.framework in Frameworks */,
 				8B076F80228FE9A400ACCD47 /* AVFoundation.framework in Frameworks */,
+				F6A1PHOTOS0120515400BFA21B /* PhotosUI.framework in Frameworks */,
 				8B076F83228FE9A400ACCD47 /* AudioToolbox.framework in Frameworks */,
 				8B076F84228FE9A400ACCD47 /* CoreMedia.framework in Frameworks */,
 				8B076F86228FE9A400ACCD47 /* OpenGLES.framework in Frameworks */,
@@ -194,6 +197,7 @@
 		8B076F88228FEA8700ACCD47 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				F6A1PHOTOS0220515400BFA21B /* PhotosUI.framework */,
 				8B076F8F228FECB200ACCD47 /* libavcodec.a */,
 				8B076F8B228FECB200ACCD47 /* libavdevice.a */,
 				8B076F90228FECB200ACCD47 /* libavfilter.a */,

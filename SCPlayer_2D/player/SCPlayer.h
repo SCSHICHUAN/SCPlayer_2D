@@ -203,6 +203,9 @@ typedef struct VideoState{
     uint32_t   delay_video_time; // 刷新线程休眠时长（ms）
     double         frame_duration;//视频帧持续时间（ms）
     int            frame_display_pending; /* 1=当前队头已送显，等 UI 出队后再算下一帧 */
+    int            hw_video; /* 1=VideoToolbox 硬解已启用（get_format 确认后） */
+    enum AVPixelFormat hw_pix_fmt; /* 硬解目标像素格式（一般为 AV_PIX_FMT_VIDEOTOOLBOX） */
+    int            hw_fallback; /* 1=VT session 失败，需重开软解并重送当前包 */
   
     //线程和退出
     pthread_t       read_tid;  //读取数据线程
@@ -227,6 +230,8 @@ static inline double sc_video_frame_ms(const VideoState *is) {
 }
 
 int scplayer(const char *filename, frame_call_bacl fn_call, void *userData);//同步好的视频帧
+/* VT 硬解失败后整路重开为软解（模拟器上常见） */
+int sc_video_reopen_software(VideoState *is);
 
 
 /* 公共队列接口（供音视频模块使用） */

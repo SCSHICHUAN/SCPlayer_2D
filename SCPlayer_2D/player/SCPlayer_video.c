@@ -8,6 +8,7 @@
 
 #include "SCPlayer_video.h"
 #include <math.h>
+#include <libavutil/hwcontext.h>
 
 //推算pts 因为有时会没有pts
 static double synchronize_video(VideoState *is,AVFrame *sec_frame,double pts){
@@ -70,13 +71,21 @@ void *video_decode_thread(void *arg){
     double duration;
     
     VideoState *is = (VideoState *)arg;
-    AVFrame *video_frame = NULL;
-    //    Frame *vp = NULL;
+    AVFrame *video_frame = NULL;   /* 解码器输出（可能是 VT 硬解帧） */
+    AVFrame *sw_frame = NULL;      /* 硬解 transfer / 软帧暂存 */
+    AVFrame *yuv_frame = NULL;     /* 统一成 YUV420P 给现有 OpenGL 渲染 */
+    AVFrame *frame_for_queue = NULL;
     
     AVRational tb = is->video_st->time_base;
     AVRational frame_rate = av_guess_frame_rate(is->ic,is->video_st,NULL);//猜测视频流或帧的帧率（Frame Rate）
     
     video_frame = av_frame_alloc();
+    sw_frame = av_frame_alloc();
+    yuv_frame = av_frame_alloc();
+    if (!video_frame || !sw_frame || !yuv_frame) {
+        ret = AVERROR(ENOMEM);
+        goto __ERROR;
+    }
     
     for(;;){
         if(is->quit){
@@ -102,12 +111,86 @@ void *video_decode_thread(void *arg){
             if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF){
                 break;//已经度到文件尾
             } else if ( ret < 0){
+                /* 模拟器上 VT 常在首帧 setup 失败，解码器状态已坏，整路重开软解并重送当前包 */
+                if (is->hw_fallback || is->video_ctx->hw_device_ctx) {
+                    av_log(is->video_ctx, AV_LOG_WARNING,
+                           "VT decode failed (%s), reopen software and retry packet\n",
+                           av_err2str(ret));
+                    if (sc_video_reopen_software(is) == 0) {
+                        ret = avcodec_send_packet(is->video_ctx, &is->video_pkt);
+                        if (ret >= 0) {
+                            continue;
+                        }
+                    }
+                }
                 av_log(is->video_ctx,AV_LOG_ERROR,"从解码器接受视频帧失败！\n");
                 ret = -1;
                 goto __ERROR;
             }
-            
-            //            is->fn(video_frame,0);
+
+            if (is->hw_fallback) {
+                /* get_format 已回退但当前包可能已损坏，重开后再解 */
+                av_frame_unref(video_frame);
+                if (sc_video_reopen_software(is) == 0) {
+                    ret = avcodec_send_packet(is->video_ctx, &is->video_pkt);
+                    if (ret >= 0) {
+                        continue;
+                    }
+                }
+                is->hw_fallback = 0;
+            }
+
+            if (video_frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+                is->hw_video = 1;
+            }
+
+            frame_for_queue = video_frame;
+            /* 硬解输出为 AV_PIX_FMT_VIDEOTOOLBOX，先转到系统内存（多为 NV12） */
+            if (video_frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+                av_frame_unref(sw_frame);
+                ret = av_hwframe_transfer_data(sw_frame, video_frame, 0);
+                if (ret < 0) {
+                    av_log(is->video_ctx, AV_LOG_ERROR,
+                           "av_hwframe_transfer_data failed: %s\n", av_err2str(ret));
+                    av_frame_unref(video_frame);
+                    continue;
+                }
+                av_frame_copy_props(sw_frame, video_frame);
+                frame_for_queue = sw_frame;
+                av_frame_unref(video_frame);
+            }
+
+            /* OpenGL 路径按 Y/U/V 平面上传，统一转成 YUV420P */
+            if (frame_for_queue->format != AV_PIX_FMT_YUV420P &&
+                frame_for_queue->format != AV_PIX_FMT_YUVJ420P) {
+                if (!is->sws_ctx) {
+                    is->sws_ctx = sws_getContext(
+                        frame_for_queue->width, frame_for_queue->height, frame_for_queue->format,
+                        frame_for_queue->width, frame_for_queue->height, AV_PIX_FMT_YUV420P,
+                        SWS_BILINEAR, NULL, NULL, NULL);
+                    if (!is->sws_ctx) {
+                        av_log(is->video_ctx, AV_LOG_ERROR, "sws_getContext failed\n");
+                        av_frame_unref(frame_for_queue);
+                        continue;
+                    }
+                }
+                av_frame_unref(yuv_frame);
+                yuv_frame->format = AV_PIX_FMT_YUV420P;
+                yuv_frame->width = frame_for_queue->width;
+                yuv_frame->height = frame_for_queue->height;
+                ret = av_frame_get_buffer(yuv_frame, 32);
+                if (ret < 0) {
+                    av_frame_unref(frame_for_queue);
+                    continue;
+                }
+                av_frame_copy_props(yuv_frame, frame_for_queue);
+                sws_scale(is->sws_ctx,
+                          (const uint8_t * const *)frame_for_queue->data,
+                          frame_for_queue->linesize, 0, frame_for_queue->height,
+                          yuv_frame->data, yuv_frame->linesize);
+                av_frame_unref(frame_for_queue);
+                frame_for_queue = yuv_frame;
+            }
             
             /*
              音视频同步相关
@@ -117,8 +200,8 @@ void *video_decode_thread(void *arg){
                         sc_sec_to_ms(av_q2d((AVRational){frame_rate.den,frame_rate.num})) : 0);
             is->frame_duration = duration;
             //视频帧呈现时间（ms）
-            pts = (video_frame->pts == AV_NOPTS_VALUE) ? NAN : sc_ts_to_ms(video_frame->pts, tb);
-            pts = synchronize_video(is,video_frame,pts);//计算video clock 视频的播放时长，当前的video_clock + 1/tbr(帧率)
+            pts = (frame_for_queue->pts == AV_NOPTS_VALUE) ? NAN : sc_ts_to_ms(frame_for_queue->pts, tb);
+            pts = synchronize_video(is,frame_for_queue,pts);//计算video clock 视频的播放时长，当前的video_clock + 1/tbr(帧率)
             
             /*
              insert FrameQueue kt_pos: 这是一个 64 位的整数，
@@ -127,14 +210,16 @@ void *video_decode_thread(void *arg){
              */
             //保存视频帧到queue中
             
-            queue_pitcure(is,video_frame,pts,duration,video_frame->pkt_pos);
-            av_frame_unref(video_frame);
+            queue_pitcure(is,frame_for_queue,pts,duration,frame_for_queue->pkt_pos);
+            av_frame_unref(frame_for_queue);
         }
     }
     
     ret = 0;
 __ERROR:
     av_frame_free(&video_frame);
+    av_frame_free(&sw_frame);
+    av_frame_free(&yuv_frame);
     return (void *)(intptr_t)ret;
 }
 
@@ -155,7 +240,7 @@ static void video_display(VideoState *is){
     is->fn_call(frame,1,is,is->userData);
 }
 
-/* 视频落后超过约 1 帧时，一次丢到对齐音频，避免 1ms 连丢把 pts 冲到音频前面 */
+/* 视频落后超过约 1s 开始狂追 */
 static void video_drop_late_frames(VideoState *is, double frame_ms)
 {
     const double nosync_threshold = 10000.0;
@@ -172,11 +257,7 @@ static void video_drop_late_frames(VideoState *is, double frame_ms)
     while (is->pictq.size > 1) {
         vp = frame_queue_peek(&is->pictq);
         diff = vp->pts - get_maste_clock(is);
-        if (isnan(diff) || fabs(diff) >= nosync_threshold) {
-            break;
-        }
-        /* 落后不到一帧：留给后面的 delay 微调 */
-        if (diff >= -frame_ms) {
+        if (isnan(diff) || fabs(diff) <= nosync_threshold) {
             break;
         }
         fream_queue_pop(&is->pictq);
@@ -190,7 +271,7 @@ void video_refresh_timer(void *userdata){
     VideoState *is = (VideoState*)userdata;
     Frame *vp = NULL;
     double actual_delay,delay,sync_threshold,ref_clock,diff = 0;
-    double frame_ms = sc_video_frame_ms(is);
+    double frame_ms = sc_video_frame_ms(is); //视频帧默认时间
     
     if(is->video_st){
         
@@ -200,17 +281,17 @@ void video_refresh_timer(void *userdata){
             is->frame_display_pending = 0;
         } else if (is->frame_display_pending) {
             /* 队头已送显：不再重复累加 delay，只按 frame_timer 等到点 / 等 GL 出队 */
-            actual_delay = is->frame_timer - sc_gettime_ms();
-            if (actual_delay < 1.0) {
-                actual_delay = 1.0;
-            }
-            is->delay_video_time = (uint32_t)(actual_delay + 0.5);
+//            actual_delay = is->frame_timer - sc_gettime_ms();
+//            if (actual_delay < 1.0) {
+//                actual_delay = 1.0;
+//            }
+//            is->delay_video_time = (uint32_t)(actual_delay + 0.5);
         } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {
             /* 音频时钟尚未建立：先别开跑，避免启动阶段乱追 */
             is->delay_video_time = 5;
         } else {
             /* 若已明显落后，先丢到接近音频再算 delay */
-            video_drop_late_frames(is, frame_ms);
+//            video_drop_late_frames(is, frame_ms);
             if (is->pictq.size == 0) {
                 is->delay_video_time = 1;
                 return;
@@ -223,7 +304,7 @@ void video_refresh_timer(void *userdata){
             //            printf("PTS = %f ms\n",vp->pts);
             
             is->video_current_pts = vp->pts;//对is的域赋值，将要播放的视频帧的pts
-            is->video_current_pts_time = sc_gettime_ms();//当前墙钟（ms）
+            is->video_current_pts_time = sc_gettime_ms();//但前时钟（ms）
             
             if(is->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
                 delay = frame_ms;

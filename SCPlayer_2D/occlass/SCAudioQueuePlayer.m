@@ -18,8 +18,9 @@
 /*
  最小是音频帧的大小  =  一个音频帧采样个数 x （nb_channels）音频通道数 x 位深
       4096(byte)  =   1024 x 2 x 2(byte)
+  预留更大缓冲，避免 resample 后一帧超过 4096 导致 memcpy 越界
  */
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE (4096 * 4)
 
 
 
@@ -50,10 +51,21 @@ SCAudioQueuePlayer *sc_self;
 
 // AudioQueue回调：buffer 播完回收后再填下一帧
 void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
-    
+    if (!inUserData || !inBuffer) {
+        return;
+    }
+
     SCAudioQueuePlayer *scp = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
     VideoState *is = scp->is;
     if (!is || is->audioq.nb_packets <= 0) {
+        /* 尚无数据：填静音并重新入队，避免队列饿死 */
+        memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataBytesCapacity);
+        inBuffer->mAudioDataByteSize = inBuffer->mAudioDataBytesCapacity > 0
+            ? (UInt32)FFMIN(BUFFER_SIZE, inBuffer->mAudioDataBytesCapacity)
+            : 0;
+        if (inBuffer->mAudioDataByteSize > 0 && scp->audioQueue) {
+            AudioQueueEnqueueBuffer(scp->audioQueue, inBuffer, 0, NULL);
+        }
         return;
     }
 
@@ -68,6 +80,10 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
             NSLog(@"音频播放结束");
         }
         return;
+    }
+
+    if (buff_size > (int)inBuffer->mAudioDataBytesCapacity) {
+        buff_size = (int)inBuffer->mAudioDataBytesCapacity;
     }
     
     inBuffer->mAudioDataByteSize = (UInt32)buff_size;
@@ -116,7 +132,7 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
                                           NULL,
                                           0, &audioQueue);
     
-    NSAssert(status == errSecSuccess, @"Initialize audioQueue Failed");
+    NSAssert(status == noErr, @"Initialize audioQueue Failed");
     
     // 创建并分配音频缓冲区
     for (int i = 0; i < NUM_BUFFERS; i++) {
@@ -124,6 +140,7 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
         if (status != noErr) {
             NSLog(@"分配AudioQueue缓冲区失败: %d", (int)status);
             AudioQueueDispose(audioQueue, true);
+            audioQueue = NULL;
             return;
         }
         // 初始化填充音频数据到缓冲区
@@ -135,6 +152,7 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
     if (status != noErr) {
         NSLog(@"启动AudioQueue失败: %d", (int)status);
         AudioQueueDispose(audioQueue, true);
+        audioQueue = NULL;
         return;
     }
 }
@@ -144,18 +162,34 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
     
 }
 - (void)stop {
-    AudioQueueStop(audioQueue, YES);
+    if (audioQueue) {
+        AudioQueueStop(audioQueue, YES);
+    }
 }
 - (void)pause {
-    AudioQueuePause(audioQueue);
+    if (audioQueue) {
+        AudioQueuePause(audioQueue);
+    }
     NSLog(@"[音频]暂停");
 }
 - (void)resume {
-    AudioQueueStart(audioQueue, NULL);
+    if (audioQueue) {
+        AudioQueueStart(audioQueue, NULL);
+    }
     NSLog(@"[音频]恢复");
 }
 - (void)cleanQueueCacheData {
-    AudioQueueFlush(audioQueue);
+    if (audioQueue) {
+        AudioQueueFlush(audioQueue);
+    }
+}
+
+- (void)dealloc {
+    if (audioQueue) {
+        AudioQueueStop(audioQueue, YES);
+        AudioQueueDispose(audioQueue, true);
+        audioQueue = NULL;
+    }
 }
 
 

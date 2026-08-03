@@ -242,6 +242,7 @@ glm::mat4 view = glm::mat4(1.0f);
 
 - (void)displayWithFrame:(AVFrame *)yuvFrame bb:(void (^)(BOOL success))completionBlock{
     
+    if (yuvFrame == NULL) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         int videoWidth = yuvFrame->width;
         int videoHeight = yuvFrame->height;

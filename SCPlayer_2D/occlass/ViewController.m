@@ -13,8 +13,10 @@
 #include "libavcodec/avcodec.h"
 #include "libswscale/swscale.h"
 #include <AVKit/AVKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <OpenGLES/ES3/glext.h>
 #import <GLKit/GLKit.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 #import "SCRender.h"
 #define kWidth ([UIScreen mainScreen].bounds.size.width)
 #define kScal 1
@@ -24,14 +26,17 @@
 #import "SCAudioQueuePlayer.h"
 
 
-@interface ViewController ()
+@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property(nonatomic,assign)BOOL end;
 @property(nonatomic,strong)UILabel *lab;
 @property(nonatomic,assign)NSInteger video_pak_count;
 @property(nonatomic,assign)NSInteger audio_pak_count;
 @property(nonatomic,strong)NSTimer *timer;
 @property(nonatomic,strong)SCRender *cRender;
+@property(nonatomic,strong)SCAudioQueuePlayer *audioPlayer; /* AudioQueue 回调持有 self，必须强引用 */
+@property(nonatomic,copy)NSString *playingPath;
 -(void)initAudio:(void *)opaque;
+-(void)startPlayWithPath:(NSString *)path;
 @end
 
 @implementation ViewController
@@ -60,55 +65,135 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
 -(void)initAudio:(void *)opaque{
     VideoState *is = (VideoState *)opaque;
-    SCAudioQueuePlayer *aup = [[SCAudioQueuePlayer alloc] init];
-    [aup initializeAudioQueue:is];
-    [aup play];
+    if (!is) {
+        return;
+    }
+    /* 不可用局部变量：initialize 后 AudioQueue 仍回调 self，局部对象会被 ARC 释放导致野指针崩溃 */
+    [self.audioPlayer stop];
+    self.audioPlayer = [[SCAudioQueuePlayer alloc] init];
+    [self.audioPlayer initializeAudioQueue:is];
+    [self.audioPlayer play];
 }
 
+-(void)startPlayWithPath:(NSString *)path{
+    if (path.length == 0) {
+        self.lab.text = @"无效的视频路径";
+        return;
+    }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        self.lab.text = @"文件不存在";
+        return;
+    }
 
--(void)testClick2{
     self.end = NO;
     self.video_pak_count = 0;
     self.audio_pak_count = 0;
-    self.lab.text = @"拉流中请稍等...";
+    self.playingPath = path;
+    self.lab.text = [NSString stringWithFormat:@"播放中: %@", path.lastPathComponent];
     [self.view addSubview:self.cRender];
-    
+
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
         }
-        scplayer("/Users/stan/Desktop/SCPlayer_2D/ffop.mp4", when_frame_push, (__bridge void *)strongSelf);
+        scplayer([path UTF8String], when_frame_push, (__bridge void *)strongSelf);
     });
-    
-    
 }
+
+-(void)testClick2{
+//    [self startPlayWithPath:@"/Users/stan/Desktop/2016物理院同学会/追光者不如见一面.mp4"];
+    [self startPlayWithPath:@"/Users/stan/Desktop/ffop.mp4"];
+}
+
+-(void)pickAlbumVideo{
+    if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypePhotoLibrary]) {
+        self.lab.text = @"当前设备不支持相册";
+        return;
+    }
+
+    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    picker.mediaTypes = @[(NSString *)kUTTypeMovie];
+    picker.delegate = self;
+    picker.allowsEditing = NO;
+    /* Passthrough：不重编码，导出/拷贝很快 */
+    if (@available(iOS 11.0, *)) {
+        picker.videoExportPreset = AVAssetExportPresetPassthrough;
+    }
+    picker.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+#pragma mark - UIImagePickerControllerDelegate
+
+- (void)imagePickerController:(UIImagePickerController *)picker
+didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
+    NSURL *mediaURL = info[UIImagePickerControllerMediaURL];
+
+    NSString *localPath = nil;
+    if (mediaURL) {
+        /* 回调里立刻拷进 App tmp（此时可读），再 dismiss 播放 */
+        NSString *ext = mediaURL.pathExtension.length ? mediaURL.pathExtension : @"MOV";
+        NSString *name = [NSString stringWithFormat:@"album_%@.%@",
+                          @((long long)([[NSDate date] timeIntervalSince1970] * 1000)), ext];
+        localPath = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+        [[NSFileManager defaultManager] removeItemAtPath:localPath error:nil];
+        NSError *err = nil;
+        if (![[NSFileManager defaultManager] copyItemAtURL:mediaURL
+                                                     toURL:[NSURL fileURLWithPath:localPath]
+                                                     error:&err]) {
+            localPath = nil;
+            self.lab.text = err.localizedDescription ?: @"拷贝相册视频失败";
+        }
+    } else {
+        self.lab.text = @"未获取到视频文件";
+    }
+
+    NSString *pathToPlay = localPath;
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (pathToPlay.length) {
+            [self startPlayWithPath:pathToPlay];
+        }
+    }];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    self.lab.text = @"已取消选择";
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    
+
     UIButton *test = [UIButton buttonWithType:UIButtonTypeCustom];
-    [[UIApplication sharedApplication].keyWindow addSubview:test];
-    test.frame = CGRectMake(50, 100, kWidth-100, 40);;
+    test.frame = CGRectMake(50, 50, kWidth - 100, 40);
     test.backgroundColor = UIColor.blueColor;
-    [test setTitle:@"START 开始拉流" forState:UIControlStateNormal];
+    [test setTitle:@"START 本地示例" forState:UIControlStateNormal];
     [test addTarget:self action:@selector(testClick2) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:test];
-    
-    UILabel *lab = [[UILabel alloc] initWithFrame: CGRectMake(50, 250, kWidth-100, 40)];
+
+    UIButton *albumBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    albumBtn.frame = CGRectMake(50, 100, kWidth - 100, 40);
+    albumBtn.backgroundColor = [UIColor colorWithRed:0.16 green:0.65 blue:0.45 alpha:1.0];
+    [albumBtn setTitle:@"选择相册视频" forState:UIControlStateNormal];
+    [albumBtn addTarget:self action:@selector(pickAlbumVideo) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:albumBtn];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(50, 150, kWidth - 100, 40)];
     lab.backgroundColor = UIColor.blackColor;
     lab.textColor = UIColor.whiteColor;
+    lab.font = [UIFont systemFontOfSize:13];
+    lab.adjustsFontSizeToFitWidth = YES;
     [self.view addSubview:lab];
     self.lab = lab;
 }
 
-
-
-
-
 -(SCRender *)cRender{
     if(!_cRender){
-        _cRender = [[SCRender alloc] initWithFrame:CGRectMake(0, 100, kWidth * kScal, kWidth * kWH * kScal)];
+        /* 放在按钮下方，避免挡住操作 */
+        _cRender = [[SCRender alloc] initWithFrame:CGRectMake(0, 200, kWidth * kScal, kWidth * kWH * kScal)];
     }
     return _cRender;
 }

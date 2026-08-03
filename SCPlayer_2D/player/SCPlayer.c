@@ -9,10 +9,29 @@
 #include "SCPlayer.h"
 #include "SCPlayer_audio.h"
 #include "SCPlayer_video.h"
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
+#include <libavcodec/codec.h>
 
 /*
 Create by stan 2024-6-30
 */
+
+/*
+ 静态链接 libavcodec.a 时，若不引用 VT hwaccel 符号，链接器会丢掉
+ videotoolbox.o，导致 get_format 列表里没有 AV_PIX_FMT_VIDEOTOOLBOX。
+ */
+extern char ff_h264_videotoolbox_hwaccel;
+extern char ff_hevc_videotoolbox_hwaccel;
+extern char ff_mpeg4_videotoolbox_hwaccel;
+extern char ff_mpeg2_videotoolbox_hwaccel;
+
+__attribute__((used)) static const void *const sc_force_link_videotoolbox[] = {
+    &ff_h264_videotoolbox_hwaccel,
+    &ff_hevc_videotoolbox_hwaccel,
+    &ff_mpeg4_videotoolbox_hwaccel,
+    &ff_mpeg2_videotoolbox_hwaccel,
+};
 
 /*
 一.main 主线程中 --------线程 1 主线程
@@ -284,6 +303,161 @@ void fream_queue_pop(FrameQueue *fq){
     pthread_mutex_unlock(&fq->mutex);
 }
 
+/* VideoToolbox：优先硬解；session 建失败时 FFmpeg 会再调一次，必须回退软格式并标记重开 */
+static enum AVPixelFormat sc_get_hw_format(AVCodecContext *ctx,
+                                           const enum AVPixelFormat *pix_fmts)
+{
+    const enum AVPixelFormat *p;
+    enum AVPixelFormat hw_pix_fmt = AV_PIX_FMT_NONE;
+    enum AVPixelFormat fallback = AV_PIX_FMT_NONE;
+    VideoState *is = ctx->opaque ? (VideoState *)ctx->opaque : NULL;
+
+    if (is) {
+        hw_pix_fmt = is->hw_pix_fmt;
+    }
+
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (hw_pix_fmt != AV_PIX_FMT_NONE && *p == hw_pix_fmt) {
+            if (is) {
+                is->hw_video = 1;
+                is->hw_fallback = 0;
+            }
+            av_log(ctx, AV_LOG_INFO, "hw get_format: %s (HW confirmed)\n",
+                   av_get_pix_fmt_name(*p));
+            return *p;
+        }
+        if (fallback == AV_PIX_FMT_NONE && *p != AV_PIX_FMT_VIDEOTOOLBOX) {
+            fallback = *p;
+        }
+    }
+
+    if (fallback == AV_PIX_FMT_NONE && pix_fmts && pix_fmts[0] != AV_PIX_FMT_NONE) {
+        fallback = pix_fmts[0];
+    }
+
+    /* VT 不在候选列表：说明刚 setup 失败，软格式续命不够，标记整路重开软解 */
+    if (is) {
+        is->hw_video = 0;
+        is->hw_pix_fmt = AV_PIX_FMT_NONE;
+        is->hw_fallback = 1;
+    }
+    ctx->get_format = NULL;
+    av_buffer_unref(&ctx->hw_device_ctx);
+
+    av_log(ctx, AV_LOG_WARNING,
+           "hw get_format: VT setup failed, will reopen software (%s)\n",
+           av_get_pix_fmt_name(fallback));
+    return fallback;
+}
+
+/* 查询 codec 是否支持 VideoToolbox，并创建 hw_device_ctx */
+static int sc_hw_decoder_init(AVCodecContext *avctx, const AVCodec *codec,
+                              enum AVPixelFormat *out_hw_pix_fmt)
+{
+    AVBufferRef *device_ref = NULL;
+    int i, ret;
+
+    *out_hw_pix_fmt = AV_PIX_FMT_NONE;
+
+    for (i = 0;; i++) {
+        const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
+        if (!config) {
+            av_log(avctx, AV_LOG_WARNING,
+                   "decoder %s has no VideoToolbox hw_config\n", codec->name);
+            return AVERROR(ENOSYS);
+        }
+        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+            config->device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
+            *out_hw_pix_fmt = config->pix_fmt;
+            av_log(avctx, AV_LOG_INFO,
+                   "VideoToolbox hw_config ok, pix_fmt=%s\n",
+                   av_get_pix_fmt_name(config->pix_fmt));
+            break;
+        }
+    }
+
+    ret = av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                NULL, NULL, 0);
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_WARNING,
+               "av_hwdevice_ctx_create(VideoToolbox) failed: %s\n", av_err2str(ret));
+        return ret;
+    }
+
+    avctx->hw_device_ctx = av_buffer_ref(device_ref);
+    av_buffer_unref(&device_ref);
+    if (!avctx->hw_device_ctx) {
+        return AVERROR(ENOMEM);
+    }
+
+    avctx->get_format = sc_get_hw_format;
+    return 0;
+}
+
+static void sc_hw_decoder_uninit(AVCodecContext *avctx)
+{
+    if (!avctx) {
+        return;
+    }
+    avctx->get_format = NULL;
+    av_buffer_unref(&avctx->hw_device_ctx);
+}
+
+/* VT session 失败后：丢弃硬解上下文，全新软解 open（保留 opaque 以外的绑定由调用方换指针） */
+int sc_video_reopen_software(VideoState *is)
+{
+    AVCodecContext *old_ctx;
+    AVCodecContext *avctx = NULL;
+    const AVCodec *codec;
+    int ret;
+
+    if (!is || !is->video_st) {
+        return AVERROR(EINVAL);
+    }
+
+    old_ctx = is->video_ctx;
+    codec = avcodec_find_decoder(is->video_st->codecpar->codec_id);
+    if (!codec) {
+        return AVERROR_DECODER_NOT_FOUND;
+    }
+
+    avctx = avcodec_alloc_context3(codec);
+    if (!avctx) {
+        return AVERROR(ENOMEM);
+    }
+
+    ret = avcodec_parameters_to_context(avctx, is->video_st->codecpar);
+    if (ret < 0) {
+        avcodec_free_context(&avctx);
+        return ret;
+    }
+
+    avctx->opaque = is;
+    /* 纯软解，不再挂 get_format / hw_device_ctx */
+    ret = avcodec_open2(avctx, codec, NULL);
+    if (ret < 0) {
+        avcodec_free_context(&avctx);
+        return ret;
+    }
+
+    if (old_ctx) {
+        sc_hw_decoder_uninit(old_ctx);
+        avcodec_free_context(&old_ctx);
+    }
+
+    is->video_ctx = avctx;
+    is->hw_video = 0;
+    is->hw_pix_fmt = AV_PIX_FMT_NONE;
+    is->hw_fallback = 0;
+    if (is->sws_ctx) {
+        sws_freeContext(is->sws_ctx);
+        is->sws_ctx = NULL;
+    }
+
+    av_log(NULL, AV_LOG_INFO, "video decoder: software (reopened after VT failure)\n");
+    return 0;
+}
+
 int stream_component_open(VideoState *is,int stream_index){
     
     int ret =-1;
@@ -326,11 +500,52 @@ int stream_component_open(VideoState *is,int stream_index){
         av_log(avctx, AV_LOG_ERROR, "不能拷贝解码参数到视频解码环境中!\n");
         goto __ERROR;
     }
-    // dc_4. 绑定解码器和上下文
-    ret = avcodec_open2(avctx, codec, NULL);
-    if (ret < 0){
-        av_log(avctx, AV_LOG_ERROR, "打开视频解码器失败: %s \n", av_err2str(ret));
-        goto __ERROR;
+
+    /* 视频：优先 VideoToolbox 硬解；真正 HW 要等 get_format 确认 */
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        is->hw_video = 0;
+        is->hw_pix_fmt = AV_PIX_FMT_NONE;
+        is->hw_fallback = 0;
+        avctx->opaque = is;
+
+        if (sc_hw_decoder_init(avctx, codec, &is->hw_pix_fmt) == 0) {
+            ret = avcodec_open2(avctx, codec, NULL);
+            if (ret < 0) {
+                av_log(avctx, AV_LOG_WARNING,
+                       "硬解 open 失败 (%s)，回退软解\n", av_err2str(ret));
+                sc_hw_decoder_uninit(avctx);
+                is->hw_pix_fmt = AV_PIX_FMT_NONE;
+                ret = avcodec_open2(avctx, codec, NULL);
+            } else if (avctx->hw_device_ctx != NULL) {
+                /* 此时往往尚未 get_format；模拟器常在首帧才暴露 VT 失败 */
+                av_log(NULL, AV_LOG_INFO,
+                       "video decoder: VideoToolbox pending (device ok)\n");
+            } else {
+                av_log(NULL, AV_LOG_WARNING,
+                       "open ok but hw_device_ctx cleared, soft\n");
+                sc_hw_decoder_uninit(avctx);
+                is->hw_pix_fmt = AV_PIX_FMT_NONE;
+            }
+        } else {
+            sc_hw_decoder_uninit(avctx);
+            is->hw_pix_fmt = AV_PIX_FMT_NONE;
+            ret = avcodec_open2(avctx, codec, NULL);
+        }
+
+        if (ret < 0) {
+            av_log(avctx, AV_LOG_ERROR, "打开视频解码器失败: %s \n", av_err2str(ret));
+            goto __ERROR;
+        }
+        if (!is->hw_video && !avctx->hw_device_ctx) {
+            av_log(NULL, AV_LOG_INFO, "video decoder: software\n");
+        }
+    } else {
+        // dc_4. 绑定解码器和上下文（音频等）
+        ret = avcodec_open2(avctx, codec, NULL);
+        if (ret < 0){
+            av_log(avctx, AV_LOG_ERROR, "打开解码器失败: %s \n", av_err2str(ret));
+            goto __ERROR;
+        }
     }
 
     switch (avctx->codec_type){
@@ -536,6 +751,11 @@ static void stream_component_close(VideoState *is, int stream_index){
       pthread_join(is->decode_tid, NULL);
       is->has_decode_tid = 0;
     }
+    if (is->sws_ctx) {
+      sws_freeContext(is->sws_ctx);
+      is->sws_ctx = NULL;
+    }
+    is->hw_video = 0;
       break;
   default:
       break;
@@ -631,7 +851,7 @@ static void do_exit(VideoState *is){
 static void video_refresh_loop(VideoState *is){
     for(;;){
         video_refresh_timer(is);
-        sc_delay_ms(is->delay_video_time);// 控制渲染视频帧的节奏
+//        sc_delay_ms(is->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
     }
     
 }
