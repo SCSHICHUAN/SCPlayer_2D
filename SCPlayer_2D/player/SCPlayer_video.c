@@ -245,6 +245,9 @@ static void video_display(VideoState *is){
         fream_queue_pop(&is->pictq);
         return;
     }
+    if (is->quit) {
+        return;
+    }
     vp = frame_queue_peek(&is->pictq);
     if (!vp || !vp->frame) {
         return;
@@ -299,7 +302,7 @@ void video_refresh_timer(void *userdata){
             is->delay_video_time = 5;
         } else {
             /* 若已明显落后，先丢到接近音频再算 delay */
-//            video_drop_late_frames(is, frame_ms);
+            video_drop_late_frames(is, frame_ms);
            
             
             //计算下一帧的显示时间

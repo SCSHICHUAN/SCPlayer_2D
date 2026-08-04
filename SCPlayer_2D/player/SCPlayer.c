@@ -11,7 +11,10 @@
 #include "SCPlayer_video.h"
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/display.h>
 #include <libavcodec/codec.h>
+#include <stdlib.h>
+#include <math.h>
 
 /*
 Create by stan 2024-6-30
@@ -166,6 +169,10 @@ int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block)
 
     pthread_mutex_lock(&q->mutex);
     for (;;) {
+        if (q->abort_request) {
+            ret = -1;
+            break;
+        }
         if (av_fifo_read(q->pkts, &mypkt, 1) >= 0) {
             q->nb_packets--;
             q->size -= mypkt.pkt->size + sizeof(mypkt);
@@ -183,6 +190,14 @@ int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block)
     }
     pthread_mutex_unlock(&q->mutex);
     return ret;
+}
+
+static void packet_queue_abort(PacketQueue *q)
+{
+    pthread_mutex_lock(&q->mutex);
+    q->abort_request = 1;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->mutex);
 }
 
 
@@ -458,6 +473,32 @@ int sc_video_reopen_software(VideoState *is)
     return 0;
 }
 
+/* 读取流旋转元数据（度），对齐 ffplay：displaymatrix / rotate tag */
+static int sc_get_stream_rotation(AVStream *st)
+{
+    double theta = 0;
+    size_t size = 0;
+    uint8_t *displaymatrix = NULL;
+    AVDictionaryEntry *entry = NULL;
+    int deg;
+
+    if (!st) {
+        return 0;
+    }
+    displaymatrix = av_stream_get_side_data(st, AV_PKT_DATA_DISPLAYMATRIX, &size);
+    if (displaymatrix && size >= 9 * sizeof(int32_t)) {
+        theta = -av_display_rotation_get((const int32_t *)displaymatrix);
+    } else {
+        entry = av_dict_get(st->metadata, "rotate", NULL, 0);
+        if (entry && entry->value && entry->value[0]) {
+            theta = atof(entry->value);
+        }
+    }
+    deg = (int)llround(theta / 90.0) * 90;
+    deg = ((deg % 360) + 360) % 360;
+    return deg;
+}
+
 int stream_component_open(VideoState *is,int stream_index){
     
     int ret =-1;
@@ -582,8 +623,10 @@ int stream_component_open(VideoState *is,int stream_index){
         is->frame_duration = sc_frame_duration_from_stream(is->ic, st);
         is->frame_last_delay = is->frame_duration;
         is->display_busy = 0;
+        is->video_rotate = sc_get_stream_rotation(st);
         is->video_current_pts_time = sc_gettime_ms();//记下 pts 时的墙钟（ms）
-        av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms\n", is->frame_duration);
+        av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms rotate=%d\n",
+               is->frame_duration, is->video_rotate);
 
         if(pthread_create(&is->decode_tid, NULL, video_decode_thread, is) != 0){
             av_log(NULL,AV_LOG_FATAL,"pthread_create(video_decode_thread)\n");
@@ -850,10 +893,15 @@ static void do_exit(VideoState *is){
 
 static void video_refresh_loop(VideoState *is){
     for(;;){
+        if (is->quit) {
+            break;
+        }
         video_refresh_timer(is);
+        if (is->quit) {
+            break;
+        }
         sc_delay_ms(is->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
     }
-    
 }
 
 
@@ -884,8 +932,13 @@ void *video_loop(void *arg){
 int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
 
     VideoState *is;
+    static int network_inited = 0;
 
     av_log_set_level(AV_LOG_INFO);
+    if (!network_inited) {
+        avformat_network_init();
+        network_inited = 1;
+    }
 
     if(!filename || !filename[0]){
         av_log(NULL,AV_LOG_FATAL,"filename is empty\n");
@@ -902,9 +955,8 @@ int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
     is->userData = userData;
 
     {
-        pthread_t video_loop_tid;
-        if(pthread_create(&video_loop_tid, NULL, video_loop, is) == 0){
-            pthread_detach(video_loop_tid);
+        if(pthread_create(&is->video_loop_tid, NULL, video_loop, is) == 0){
+            is->has_video_loop_tid = 1;
         } else {
             av_log(NULL,AV_LOG_FATAL,"pthread_create(video_loop)\n");
             do_exit(is);
@@ -912,6 +964,24 @@ int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
         }
     }
     return 0;
+}
+
+void scplayer_stop(VideoState *is)
+{
+    if (!is) {
+        return;
+    }
+    is->quit = 1;
+    packet_queue_abort(&is->videoq);
+    packet_queue_abort(&is->audioq);
+    frame_queue_abort(&is->pictq);
+    frame_queue_signal(&is->pictq);
+
+    if (is->has_video_loop_tid) {
+        pthread_join(is->video_loop_tid, NULL);
+        is->has_video_loop_tid = 0;
+    }
+    stream_close(is);
 }
 /*
 

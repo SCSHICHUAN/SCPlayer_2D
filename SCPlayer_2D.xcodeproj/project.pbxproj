@@ -45,6 +45,7 @@
 		F692D1243020516600BFA21B /* SCPlayer_audio.c in Sources */ = {isa = PBXBuildFile; fileRef = F692D1233020516600BFA21B /* SCPlayer_audio.c */; };
 		F69FEC8E2C3BEB7B00ACFC92 /* SCPlayer.c in Sources */ = {isa = PBXBuildFile; fileRef = F69FEC8D2C3BEB7B00ACFC92 /* SCPlayer.c */; };
 		F69FECEA2C3F878700ACFC92 /* SCAudioQueuePlayer.m in Sources */ = {isa = PBXBuildFile; fileRef = F69FECE92C3F878700ACFC92 /* SCAudioQueuePlayer.m */; };
+		A1B2C3D42E6F8000111111 /* SCDropdownButton.m in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42E6F8000111113 /* SCDropdownButton.m */; };
 		F6C7552D2C5CC2BD006EFCDF /* OCRender.m in Sources */ = {isa = PBXBuildFile; fileRef = F6C7552C2C5CC2BD006EFCDF /* OCRender.m */; };
 		F6C7552F2C5CCE23006EFCDF /* fragmentShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C7552E2C5CCE23006EFCDF /* fragmentShader.glsl */; };
 		F6C755312C5CCE2C006EFCDF /* vertexShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C755302C5CCE2C006EFCDF /* vertexShader.glsl */; };
@@ -105,6 +106,8 @@
 		F69FEC8D2C3BEB7B00ACFC92 /* SCPlayer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer.c; sourceTree = "<group>"; };
 		F69FECE82C3F878700ACFC92 /* SCAudioQueuePlayer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCAudioQueuePlayer.h; sourceTree = "<group>"; };
 		F69FECE92C3F878700ACFC92 /* SCAudioQueuePlayer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCAudioQueuePlayer.m; sourceTree = "<group>"; };
+		A1B2C3D42E6F8000111112 /* SCDropdownButton.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCDropdownButton.h; sourceTree = "<group>"; };
+		A1B2C3D42E6F8000111113 /* SCDropdownButton.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SCDropdownButton.m; sourceTree = "<group>"; };
 		F69FECEB2C3F887A00ACFC92 /* FFAudioInformation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FFAudioInformation.h; sourceTree = "<group>"; };
 		F6A3FF432D911F0500314ECB /* Public.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Public.h; sourceTree = "<group>"; };
 		F6C7552B2C5CC2BD006EFCDF /* OCRender.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OCRender.h; sourceTree = "<group>"; };
@@ -283,6 +286,8 @@
 			children = (
 				F69FECE82C3F878700ACFC92 /* SCAudioQueuePlayer.h */,
 				F69FECE92C3F878700ACFC92 /* SCAudioQueuePlayer.m */,
+				A1B2C3D42E6F8000111112 /* SCDropdownButton.h */,
+				A1B2C3D42E6F8000111113 /* SCDropdownButton.m */,
 				8B076F5C228FE85200ACCD47 /* ViewController.h */,
 				8B076F5D228FE85200ACCD47 /* ViewController.m */,
 				8B076F59228FE85200ACCD47 /* AppDelegate.h */,
@@ -406,6 +411,7 @@
 				8B076F69228FE85200ACCD47 /* main.m in Sources */,
 				F692D1243020516600BFA21B /* SCPlayer_audio.c in Sources */,
 				F69FECEA2C3F878700ACFC92 /* SCAudioQueuePlayer.m in Sources */,
+				A1B2C3D42E6F8000111111 /* SCDropdownButton.m in Sources */,
 				8B076F5B228FE85200ACCD47 /* AppDelegate.m in Sources */,
 				F66487002B57CE220017426C /* SCRender.mm in Sources */,
 				F6C7552D2C5CC2BD006EFCDF /* OCRender.m in Sources */,

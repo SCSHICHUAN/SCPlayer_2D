@@ -114,6 +114,7 @@ typedef struct PacketQueue
     int nb_packets;   // 元素的个数
     int size;         // 整个queue的大小
     int64_t duration; // 包队列累加 duration（流 time_base 刻度，非 ms）
+    int abort_request;
 
     pthread_mutex_t mutex; // 互斥锁
     pthread_cond_t cond;   // 条件变量
@@ -203,6 +204,7 @@ typedef struct VideoState{
     double         delay_video_time; // 刷新线程休眠时长（ms）
     double         frame_duration;//视频帧持续时间（ms）
     int            display_busy; /* 仅送显门闩：模块置 1，接入方完成显示后清 0；不参与同步 */
+    int            video_rotate; /* 流元数据旋转角（度，0/90/180/270），显示时纠正 */
     int            hw_video; /* 1=VideoToolbox 硬解已启用（get_format 确认后） */
     enum AVPixelFormat hw_pix_fmt; /* 硬解目标像素格式（一般为 AV_PIX_FMT_VIDEOTOOLBOX） */
     int            hw_fallback; /* 1=VT session 失败，需重开软解并重送当前包 */
@@ -210,8 +212,10 @@ typedef struct VideoState{
     //线程和退出
     pthread_t       read_tid;  //读取数据线程
     pthread_t       decode_tid;//解码线程
+    pthread_t       video_loop_tid; //刷新线程
     int             has_read_tid;
     int             has_decode_tid;
+    int             has_video_loop_tid;
     int             quit;
     
     //回调
@@ -230,6 +234,8 @@ static inline double sc_video_frame_ms(const VideoState *is) {
 }
 
 int scplayer(const char *filename, frame_call_bacl fn_call, void *userData);//同步好的视频帧
+/* 停止并释放一次播放（切换片源前调用） */
+void scplayer_stop(VideoState *is);
 /* VT 硬解失败后整路重开为软解（模拟器上常见） */
 int sc_video_reopen_software(VideoState *is);
 

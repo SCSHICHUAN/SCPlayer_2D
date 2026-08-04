@@ -24,6 +24,11 @@
 	<string>需要访问相册以选择要播放的视频</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>需要访问相册以选择要播放的视频</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

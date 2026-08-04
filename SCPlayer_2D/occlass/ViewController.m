@@ -18,15 +18,12 @@
 #import <GLKit/GLKit.h>
 #import <MobileCoreServices/MobileCoreServices.h>
 #import "SCRender.h"
-#define kWidth ([UIScreen mainScreen].bounds.size.width)
-#define kScal 1
-#define kWH (1280/720.0)
-//#define kWH (9/16.0)
 #include "SCPlayer.h"
 #import "SCAudioQueuePlayer.h"
+#import "SCDropdownButton.h"
 
 
-@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate>
 @property(nonatomic,assign)BOOL end;
 @property(nonatomic,strong)UILabel *lab;
 @property(nonatomic,assign)NSInteger video_pak_count;
@@ -35,8 +32,24 @@
 @property(nonatomic,strong)SCRender *cRender;
 @property(nonatomic,strong)SCAudioQueuePlayer *audioPlayer; /* AudioQueue 回调持有 self，必须强引用 */
 @property(nonatomic,copy)NSString *playingPath;
+@property(nonatomic,strong)UIButton *modeBtn;
+@property(nonatomic,strong)SCDropdownButton *qualityDropdown;
+@property(nonatomic,strong)SCDropdownButton *msaaDropdown;
+@property(nonatomic,strong)UITextField *urlField;
+@property(nonatomic,strong)UIView *controlsBar;
+@property(nonatomic,assign)BOOL controlsVisible;
+@property(nonatomic,assign)VideoState *playingIs;
 -(void)initAudio:(void *)opaque;
 -(void)startPlayWithPath:(NSString *)path;
+-(void)playURLFromField;
+-(BOOL)isNetworkURL:(NSString *)s;
+-(void)stopCurrentPlayback;
+-(void)toggleRenderMode;
+-(void)updateModeButtonTitle;
+-(UIButton *)makeButton:(NSString *)title action:(SEL)action;
+-(void)buildControls;
+-(void)toggleControlsVisibility;
+-(void)onCenterTap:(UITapGestureRecognizer *)gr;
 @end
 
 @implementation ViewController
@@ -57,11 +70,21 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             }
             return 0;
         }
+        if (!is || is->quit) {
+            av_frame_free(&frame);
+            if (is) {
+                is->display_busy = 0;
+            }
+            return 0;
+        }
+        vc.playingIs = is;
+        vc.cRender.rotateDegrees = is->video_rotate;
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
             AVFrame *owned = frame;
             av_frame_free(&owned);
-            if (is) {
+            /* 已切走片源则不要再写已释放的 VideoState */
+            if (vc.playingIs == is) {
                 is->display_busy = 0;
             }
         }];
@@ -84,22 +107,61 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self.audioPlayer play];
 }
 
+-(void)stopCurrentPlayback{
+    VideoState *is = self.playingIs;
+    self.playingIs = NULL;
+    [self.audioPlayer stop];
+    self.audioPlayer = nil;
+    self.cRender.rotateDegrees = 0;
+    [self.cRender clearDisplay];
+    if (is) {
+        is->display_busy = 0;
+        scplayer_stop(is);
+    }
+}
+
+-(BOOL)isNetworkURL:(NSString *)s{
+    NSString *lower = s.lowercaseString;
+    return [lower hasPrefix:@"http://"]
+        || [lower hasPrefix:@"https://"]
+        || [lower hasPrefix:@"rtmp://"]
+        || [lower hasPrefix:@"rtsp://"]
+        || [lower hasPrefix:@"udp://"]
+        || [lower hasPrefix:@"tcp://"];
+}
+
 -(void)startPlayWithPath:(NSString *)path{
+    path = [path stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (path.length == 0) {
         self.lab.text = @"无效的视频路径";
         return;
     }
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    BOOL network = [self isNetworkURL:path];
+    if (!network && ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
         self.lab.text = @"文件不存在";
         return;
     }
+
+    /* 切换片源：先停旧实例并清屏 */
+    [self stopCurrentPlayback];
+    [self.view endEditing:YES];
 
     self.end = NO;
     self.video_pak_count = 0;
     self.audio_pak_count = 0;
     self.playingPath = path;
-    self.lab.text = [NSString stringWithFormat:@"播放中: %@", path.lastPathComponent];
-    [self.view addSubview:self.cRender];
+    if (network) {
+        self.lab.text = [NSString stringWithFormat:@"播放 URL: %@", path];
+    } else {
+        self.lab.text = [NSString stringWithFormat:@"播放中: %@", path.lastPathComponent];
+    }
+
+    if (!self.cRender.superview) {
+        [self.view insertSubview:self.cRender atIndex:0];
+    } else {
+        [self.view sendSubviewToBack:self.cRender];
+    }
+    [self.view bringSubviewToFront:self.controlsBar];
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
@@ -107,13 +169,221 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         if (!strongSelf) {
             return;
         }
-        scplayer([path UTF8String], when_frame_push, (__bridge void *)strongSelf);
+        int ret = scplayer([path UTF8String], when_frame_push, (__bridge void *)strongSelf);
+        if (ret != 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                strongSelf.lab.text = @"打开失败，请检查路径或 URL";
+            });
+        }
     });
+}
+
+-(void)playURLFromField{
+    [self startPlayWithPath:self.urlField.text];
 }
 
 -(void)testClick2{
 //    [self startPlayWithPath:@"/Users/stan/Desktop/2016物理院同学会/追光者不如见一面.mp4"];
     [self startPlayWithPath:@"/Users/stan/Desktop/ffop.mp4"];
+}
+
+-(void)toggleRenderMode{
+    if (self.cRender.fillMode == SCRenderFillModeAspectFit) {
+        self.cRender.fillMode = SCRenderFillModeScaleToFill;
+    } else {
+        self.cRender.fillMode = SCRenderFillModeAspectFit;
+    }
+    [self updateModeButtonTitle];
+}
+
+-(void)updateModeButtonTitle{
+    NSString *title = (self.cRender.fillMode == SCRenderFillModeAspectFit)
+        ? @"等比例"
+        : @"拉伸铺满";
+    [self.modeBtn setTitle:title forState:UIControlStateNormal];
+}
+
+/* 与 GL-ARKit makeButton 同风格：半透明黑底 + 白字 + 圆角 */
+-(UIButton *)makeButton:(NSString *)title action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightSemibold];
+    b.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    b.layer.cornerRadius = 8;
+    b.contentEdgeInsets = UIEdgeInsetsMake(8, 10, 8, 10);
+    if (action) {
+        [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    }
+    return b;
+}
+
+-(void)buildControls{
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.25];
+    bar.layer.cornerRadius = 10;
+    [self.view addSubview:bar];
+    self.controlsBar = bar;
+
+    UIButton *startBtn = [self makeButton:@"本地示例" action:@selector(testClick2)];
+    UIButton *albumBtn = [self makeButton:@"相册视频" action:@selector(pickAlbumVideo)];
+    UIButton *modeBtn = [self makeButton:@"等比例" action:@selector(toggleRenderMode)];
+    self.modeBtn = modeBtn;
+
+    SCDropdownButton *qualityDrop =
+        [[SCDropdownButton alloc] initWithPrefix:@"画质"
+                                         options:@[@"流畅", @"均衡", @"高清", @"超清"]
+                                   selectedIndex:SCRenderQualityBalanced];
+    qualityDrop.panelAlignment = SCDropdownPanelAlignmentLeading;
+    __weak typeof(self) weakSelf = self;
+    qualityDrop.selectionHandler = ^(NSInteger index, NSString *title) {
+        (void)title;
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.cRender.quality = (SCRenderQuality)index;
+        strongSelf.lab.text = [NSString stringWithFormat:@"画质: %@", title];
+    };
+    self.qualityDropdown = qualityDrop;
+
+    SCDropdownButton *msaaDrop =
+        [[SCDropdownButton alloc] initWithPrefix:@"抗锯齿"
+                                         options:@[@"关", @"2x", @"4x", @"8x"]
+                                   selectedIndex:SCRenderMSAA4x];
+    msaaDrop.panelAlignment = SCDropdownPanelAlignmentLeading;
+    msaaDrop.selectionHandler = ^(NSInteger index, NSString *title) {
+        (void)title;
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.cRender.msaaLevel = (SCRenderMSAALevel)index;
+        strongSelf.lab.text = [NSString stringWithFormat:@"抗锯齿: %@", title];
+    };
+    self.msaaDropdown = msaaDrop;
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+    lab.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+    lab.numberOfLines = 2;
+    lab.adjustsFontSizeToFitWidth = YES;
+    lab.text = @"点屏幕中心可显隐控件";
+    self.lab = lab;
+
+    startBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    albumBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    modeBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:startBtn];
+    [bar addSubview:albumBtn];
+    [bar addSubview:modeBtn];
+    [bar addSubview:qualityDrop];
+    [bar addSubview:msaaDrop];
+    [bar addSubview:lab];
+
+    UITextField *urlField = [[UITextField alloc] initWithFrame:CGRectZero];
+    urlField.translatesAutoresizingMaskIntoConstraints = NO;
+    urlField.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+    urlField.textColor = UIColor.whiteColor;
+    urlField.tintColor = UIColor.whiteColor;
+    urlField.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+    urlField.attributedPlaceholder = [[NSAttributedString alloc]
+                                      initWithString:@"输入 http(s)/rtmp/rtsp URL"
+                                      attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.45]}];
+    urlField.keyboardType = UIKeyboardTypeURL;
+    urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    urlField.autocorrectionType = UITextAutocorrectionTypeNo;
+    urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    urlField.returnKeyType = UIReturnKeyGo;
+    urlField.layer.cornerRadius = 8;
+    urlField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
+    urlField.leftViewMode = UITextFieldViewModeAlways;
+    urlField.delegate = self;
+    self.urlField = urlField;
+
+    UIButton *urlPlayBtn = [self makeButton:@"播放URL" action:@selector(playURLFromField)];
+    urlPlayBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [bar addSubview:urlField];
+    [bar addSubview:urlPlayBtn];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [bar.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [bar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+
+        [startBtn.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
+        [startBtn.topAnchor constraintEqualToAnchor:bar.topAnchor constant:10],
+        [startBtn.heightAnchor constraintEqualToConstant:36],
+
+        [albumBtn.leadingAnchor constraintEqualToAnchor:startBtn.trailingAnchor constant:8],
+        [albumBtn.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
+        [albumBtn.heightAnchor constraintEqualToConstant:36],
+
+        [modeBtn.leadingAnchor constraintEqualToAnchor:albumBtn.trailingAnchor constant:8],
+        [modeBtn.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
+        [modeBtn.heightAnchor constraintEqualToConstant:36],
+
+        [qualityDrop.leadingAnchor constraintEqualToAnchor:modeBtn.trailingAnchor constant:8],
+        [qualityDrop.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
+
+        [msaaDrop.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
+        [msaaDrop.topAnchor constraintEqualToAnchor:startBtn.bottomAnchor constant:8],
+
+        [lab.leadingAnchor constraintEqualToAnchor:msaaDrop.trailingAnchor constant:8],
+        [lab.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
+        [lab.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
+
+        [urlField.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
+        [urlField.topAnchor constraintEqualToAnchor:msaaDrop.bottomAnchor constant:8],
+        [urlField.heightAnchor constraintEqualToConstant:36],
+
+        [urlPlayBtn.leadingAnchor constraintEqualToAnchor:urlField.trailingAnchor constant:8],
+        [urlPlayBtn.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
+        [urlPlayBtn.centerYAnchor constraintEqualToAnchor:urlField.centerYAnchor],
+        [urlPlayBtn.heightAnchor constraintEqualToConstant:36],
+        [urlPlayBtn.widthAnchor constraintGreaterThanOrEqualToConstant:72],
+
+        [urlField.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-10],
+    ]];
+
+    self.controlsVisible = YES;
+    self.cRender.quality = SCRenderQualityBalanced;
+    self.cRender.msaaLevel = SCRenderMSAA4x;
+    [self updateModeButtonTitle];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    if (textField == self.urlField) {
+        [self playURLFromField];
+        return NO;
+    }
+    return YES;
+}
+
+-(void)toggleControlsVisibility{
+    self.controlsVisible = !self.controlsVisible;
+    [UIView animateWithDuration:0.2 animations:^{
+        self.controlsBar.alpha = self.controlsVisible ? 1.0 : 0.0;
+    }];
+    self.controlsBar.userInteractionEnabled = self.controlsVisible;
+}
+
+-(void)onCenterTap:(UITapGestureRecognizer *)gr{
+    CGPoint p = [gr locationInView:self.view];
+    CGRect bounds = self.view.bounds;
+    /* 屏幕中心区：宽高各约 40% */
+    CGFloat w = bounds.size.width * 0.4;
+    CGFloat h = bounds.size.height * 0.4;
+    CGRect center = CGRectMake((bounds.size.width - w) * 0.5,
+                               (bounds.size.height - h) * 0.5,
+                               w, h);
+    if (!CGRectContainsPoint(center, p)) {
+        return;
+    }
+    /* 控件显示且点在控件上时，交给按钮，不切换 */
+    if (self.controlsVisible && CGRectContainsPoint(self.controlsBar.frame, p)) {
+        return;
+    }
+    [self toggleControlsVisibility];
 }
 
 -(void)pickAlbumVideo{
@@ -175,36 +445,33 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.10 alpha:1.0];
 
-    UIButton *test = [UIButton buttonWithType:UIButtonTypeCustom];
-    test.frame = CGRectMake(50, 50, kWidth - 100, 40);
-    test.backgroundColor = UIColor.blueColor;
-    [test setTitle:@"START 本地示例" forState:UIControlStateNormal];
-    [test addTarget:self action:@selector(testClick2) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:test];
+    [self.view insertSubview:self.cRender atIndex:0];
+    [self buildControls];
 
-    UIButton *albumBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    albumBtn.frame = CGRectMake(50, 100, kWidth - 100, 40);
-    albumBtn.backgroundColor = [UIColor colorWithRed:0.16 green:0.65 blue:0.45 alpha:1.0];
-    [albumBtn setTitle:@"选择相册视频" forState:UIControlStateNormal];
-    [albumBtn addTarget:self action:@selector(pickAlbumVideo) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:albumBtn];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                        action:@selector(onCenterTap:)];
+    tap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:tap];
+}
 
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(50, 150, kWidth - 100, 40)];
-    lab.backgroundColor = UIColor.blackColor;
-    lab.textColor = UIColor.whiteColor;
-    lab.font = [UIFont systemFontOfSize:13];
-    lab.adjustsFontSizeToFitWidth = YES;
-    [self.view addSubview:lab];
-    self.lab = lab;
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.cRender.frame = self.view.bounds;
 }
 
 -(SCRender *)cRender{
     if(!_cRender){
-        /* 放在按钮下方，避免挡住操作 */
-        _cRender = [[SCRender alloc] initWithFrame:CGRectMake(0, 200, kWidth * kScal, kWidth * kWH * kScal)];
+        _cRender = [[SCRender alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        _cRender.fillMode = SCRenderFillModeAspectFit;
+        _cRender.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     }
     return _cRender;
+}
+
+- (BOOL)prefersStatusBarHidden {
+    return YES;
 }
 
 @end

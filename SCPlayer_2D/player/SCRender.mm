@@ -49,9 +49,17 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
     /// 片段着色器
     GLuint _fragmentShader;
     
-    GLuint          _colorRenderBuffer;
-    GLuint          _depthRenderBuffer;
-    GLuint          _frameBuffer;
+    GLuint          _colorRenderBuffer;   /* drawable 解析目标 */
+    GLuint          _depthRenderBuffer;   /* 非 MSAA 深度；MSAA 时用 _msaaDepth */
+    GLuint          _frameBuffer;         /* 实际绘制用：MSAA 或 resolve */
+    GLuint          _resolveFrameBuffer;  /* 挂 drawable 的 FBO */
+    GLuint          _msaaFrameBuffer;
+    GLuint          _msaaColorBuffer;
+    GLuint          _msaaDepthBuffer;
+    GLint           _fboWidth;
+    GLint           _fboHeight;
+    GLint           _msaaSamples; /* 0=关，2/4 */
+    BOOL            _useMSAA;
     CAEAGLLayer     *_eaglLayer;
 }
 @end
@@ -84,6 +92,10 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
 -(instancetype)initWithFrame:(CGRect)frame{
     self = [super initWithFrame:frame];
     if(self){
+        _fillMode = SCRenderFillModeAspectFit;
+        _quality = SCRenderQualityBalanced;
+        _msaaLevel = SCRenderMSAA4x;
+        _rotateDegrees = 0;
         [self config];
     }
     return self;
@@ -95,20 +107,117 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
     [self _setupOpenGL];
 }
 
+- (CGFloat)_scaleForQuality {
+    CGFloat native = [UIScreen mainScreen].scale;
+    if (native < 1.0) {
+        native = 1.0;
+    }
+    switch (self.quality) {
+        case SCRenderQualityFluent:
+            return 1.0;
+        case SCRenderQualityHigh:
+            return native;
+        case SCRenderQualityUltra:
+            /* 高于屏密度超采样，上限 4 防止 FBO 过大 */
+            return MIN(native * 1.5, 4.0);
+        case SCRenderQualityBalanced:
+        default:
+            return MIN(2.0, native);
+    }
+}
+
+- (GLint)_samplesForMSAALevel {
+    GLint want = 0;
+    switch (self.msaaLevel) {
+        case SCRenderMSAA2x: want = 2; break;
+        case SCRenderMSAA4x: want = 4; break;
+        case SCRenderMSAA8x: want = 8; break;
+        case SCRenderMSAAOff:
+        default: want = 0; break;
+    }
+    if (want <= 0) {
+        return 0;
+    }
+    GLint maxSamples = 0;
+    glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
+    if (maxSamples < 1) {
+        maxSamples = 4;
+    }
+    return MIN(want, maxSamples);
+}
+
+- (void)setQuality:(SCRenderQuality)quality {
+    if (_quality == quality) {
+        return;
+    }
+    _quality = quality;
+    [self applyDrawableScaleAndRebuild];
+}
+
+- (void)setMsaaLevel:(SCRenderMSAALevel)msaaLevel {
+    if (_msaaLevel == msaaLevel) {
+        return;
+    }
+    _msaaLevel = msaaLevel;
+    [self applyDrawableScaleAndRebuild];
+}
+
+- (void)destroyFrameAndRenderBuffer {
+    if (!glView.context) {
+        return;
+    }
+    [EAGLContext setCurrentContext:glView.context];
+    if (_msaaColorBuffer) { glDeleteRenderbuffers(1, &_msaaColorBuffer); _msaaColorBuffer = 0; }
+    if (_msaaDepthBuffer) { glDeleteRenderbuffers(1, &_msaaDepthBuffer); _msaaDepthBuffer = 0; }
+    if (_msaaFrameBuffer) { glDeleteFramebuffers(1, &_msaaFrameBuffer); _msaaFrameBuffer = 0; }
+    if (_depthRenderBuffer) { glDeleteRenderbuffers(1, &_depthRenderBuffer); _depthRenderBuffer = 0; }
+    if (_colorRenderBuffer) { glDeleteRenderbuffers(1, &_colorRenderBuffer); _colorRenderBuffer = 0; }
+    if (_resolveFrameBuffer) { glDeleteFramebuffers(1, &_resolveFrameBuffer); _resolveFrameBuffer = 0; }
+    _frameBuffer = 0;
+    _useMSAA = NO;
+    _msaaSamples = 0;
+    _fboWidth = _fboHeight = 0;
+}
+
+- (void)applyDrawableScaleAndRebuild {
+    if (!glView || !_eaglLayer) {
+        return;
+    }
+    CGFloat scale = [self _scaleForQuality];
+    glView.contentScaleFactor = scale;
+    _eaglLayer.contentsScale = scale;
+    [self destroyFrameAndRenderBuffer];
+    [self setupFrameAndRenderBuffer];
+}
+
 -(void)_creatOpenGLContent{
     glView = [[GLKView alloc] initWithFrame:self.bounds];
+    glView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     glView.context = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
+    /* 自管 FBO，关掉 GLKView 自带 drawable，避免抢 layer */
+    glView.enableSetNeedsDisplay = NO;
     [EAGLContext setCurrentContext:glView.context];
     [self addSubview:glView];
     _eaglLayer = (CAEAGLLayer *)glView.layer;
-    /* 实测：scale=2 时 FBO≈828x1472，YUV 全屏 draw≈38ms；改为 1 降填充量 */
-    glView.contentScaleFactor = 1.0;
-    _eaglLayer.contentsScale = 4.0;
+    _eaglLayer.opaque = YES;
     _eaglLayer.drawableProperties = @{
         kEAGLDrawablePropertyRetainedBacking : @NO,
         kEAGLDrawablePropertyColorFormat : kEAGLColorFormatRGBA8
     };
-    [self setupFrameAndRenderBuffer];
+    [self applyDrawableScaleAndRebuild];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!glView) {
+        return;
+    }
+    CGSize old = glView.bounds.size;
+    glView.frame = self.bounds;
+    CGSize now = glView.bounds.size;
+    if (fabs(old.width - now.width) > 0.5 || fabs(old.height - now.height) > 0.5) {
+        [self applyDrawableScaleAndRebuild];
+    }
 }
 
 
@@ -289,11 +398,21 @@ glm::mat4 view = glm::mat4(1.0f);
         glBindFramebuffer(GL_FRAMEBUFFER, self->_frameBuffer);
         glBindRenderbuffer(GL_RENDERBUFFER, self->_colorRenderBuffer);
         
+        GLint fboW = 0, fboH = 0;
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &fboW);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &fboH);
+        if (fboW <= 0 || fboH <= 0) {
+            if (completionBlock) completionBlock(NO);
+            return;
+        }
+        
         // 用 fence 等 GPU，避免 draw 测成 0.00
         double t0 = sc_gl_now_ms();
         
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
+        /* 先全屏清黑，等比例时黑边来自这里 */
+        glViewport(0, 0, fboW, fboH);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(self->_glProgram);
@@ -346,12 +465,18 @@ glm::mat4 view = glm::mat4(1.0f);
         }
         double t_u1 = sc_gl_now_ms();
         
-        // 180° + 水平镜像（左右翻转）
+        // GL 纹理原点修正 + 流旋转元数据（竖屏常带 90/270）
         glm::mat4 projection = glm::mat4(1.0f);
         glm::mat4 view = glm::mat4(1.0f);
         glm::mat4 model = glm::mat4(1.0f);
         model = glm::rotate(model, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         model = glm::scale(model, glm::vec3(-1.0f, 1.0f, 1.0f));
+        {
+            int rot = ((self.rotateDegrees % 360) + 360) % 360;
+            if (rot != 0) {
+                model = glm::rotate(model, glm::radians((float)rot), glm::vec3(0.0f, 0.0f, 1.0f));
+            }
+        }
         
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "projection"), 1, GL_FALSE, &projection[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "view"), 1, GL_FALSE, &view[0][0]);
@@ -359,6 +484,32 @@ glm::mat4 view = glm::mat4(1.0f);
         
         float videoToRenderRatio = yScaleX;
         glUniform1f(glGetUniformLocation(self->_glProgram, "videoToRenderRatio"), videoToRenderRatio);
+        
+        /* 显示模式：等比例 letterbox / 拉伸铺满（90/270 交换宽高算比例） */
+        if (self.fillMode == SCRenderFillModeAspectFit) {
+            float viewAspect = (float)fboW / (float)fboH;
+            int rot = ((self.rotateDegrees % 360) + 360) % 360;
+            float dispW = (float)videoWidth;
+            float dispH = (float)videoHeight;
+            if (rot == 90 || rot == 270) {
+                dispW = (float)videoHeight;
+                dispH = (float)videoWidth;
+            }
+            float videoAspect = dispW / dispH;
+            GLint vpX = 0, vpY = 0, vpW = fboW, vpH = fboH;
+            if (videoAspect > viewAspect) {
+                vpW = fboW;
+                vpH = (GLint)(fboW / videoAspect + 0.5f);
+                vpY = (fboH - vpH) / 2;
+            } else {
+                vpH = fboH;
+                vpW = (GLint)(fboH * videoAspect + 0.5f);
+                vpX = (fboW - vpW) / 2;
+            }
+            glViewport(vpX, vpY, vpW, vpH);
+        } else {
+            glViewport(0, 0, fboW, fboH);
+        }
         
         glBindVertexArray(self->_VAO);
         double t_d0 = sc_gl_now_ms();
@@ -371,7 +522,7 @@ glm::mat4 view = glm::mat4(1.0f);
         double t_d1 = sc_gl_now_ms();
         
         double t_p0 = sc_gl_now_ms();
-        [self->glView.context presentRenderbuffer:GL_RENDERBUFFER];
+        [self resolveMSAAIfNeededAndPresent];
         {
             GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
             glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
@@ -390,6 +541,34 @@ glm::mat4 view = glm::mat4(1.0f);
     });
 }
 
+- (void)resolveMSAAIfNeededAndPresent {
+    if (self->_useMSAA && self->_msaaFrameBuffer && self->_resolveFrameBuffer) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, self->_msaaFrameBuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self->_resolveFrameBuffer);
+        glBlitFramebuffer(0, 0, self->_fboWidth, self->_fboHeight,
+                          0, 0, self->_fboWidth, self->_fboHeight,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+    glBindRenderbuffer(GL_RENDERBUFFER, self->_colorRenderBuffer);
+    [glView.context presentRenderbuffer:GL_RENDERBUFFER];
+}
+
+- (void)clearDisplay {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self->glView.context || !self->_frameBuffer) {
+            return;
+        }
+        [EAGLContext setCurrentContext:self->glView.context];
+        glBindFramebuffer(GL_FRAMEBUFFER, self->_frameBuffer);
+        if (self->_fboWidth > 0 && self->_fboHeight > 0) {
+            glViewport(0, 0, self->_fboWidth, self->_fboHeight);
+        }
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        [self resolveMSAAIfNeededAndPresent];
+    });
+}
+
 
 
 
@@ -397,12 +576,16 @@ glm::mat4 view = glm::mat4(1.0f);
 
 - (void)setupFrameAndRenderBuffer
 {
-    // Setup color render buffer
+    [EAGLContext setCurrentContext:glView.context];
+
+    // drawable color buffer
     glGenRenderbuffers(1, &_colorRenderBuffer);
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderBuffer);
-    [glView.context renderbufferStorage:GL_RENDERBUFFER fromDrawable:_eaglLayer];
-    
-    // Setup depth render buffer
+    if (![glView.context renderbufferStorage:GL_RENDERBUFFER fromDrawable:_eaglLayer]) {
+        NSLog(@"Error: renderbufferStorage fromDrawable failed");
+        return;
+    }
+
     GLint width = 0, height = 0;
     glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
     glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
@@ -411,34 +594,69 @@ glm::mat4 view = glm::mat4(1.0f);
               width, height, NSStringFromCGRect(_eaglLayer.bounds), _eaglLayer.contentsScale);
         return;
     }
-    
+    _fboWidth = width;
+    _fboHeight = height;
     glViewport(0, 0, width, height);
-    
-    // Create a depth buffer that has the same size as the color buffer.
-    glGenRenderbuffers(1, &_depthRenderBuffer);
-    glBindRenderbuffer(GL_RENDERBUFFER, _depthRenderBuffer);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width, height);
-    
-    // Setup frame buffer
-    glGenFramebuffers(1, &_frameBuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, _frameBuffer);
-    
-    // Attach color render buffer and depth render buffer to frameBuffer
+
+    glGenFramebuffers(1, &_resolveFrameBuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, _resolveFrameBuffer);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER, _colorRenderBuffer);
-    
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                              GL_RENDERBUFFER, _depthRenderBuffer);
-    
-    // Set color render buffer as current render buffer
+
+    _msaaSamples = [self _samplesForMSAALevel];
+    _useMSAA = (_msaaSamples > 0);
+    if (_useMSAA) {
+        glGenFramebuffers(1, &_msaaFrameBuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, _msaaFrameBuffer);
+
+        glGenRenderbuffers(1, &_msaaColorBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, _msaaColorBuffer);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, _msaaSamples, GL_RGBA8, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, _msaaColorBuffer);
+
+        glGenRenderbuffers(1, &_msaaDepthBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, _msaaDepthBuffer);
+        glRenderbufferStorageMultisample(GL_RENDERBUFFER, _msaaSamples, GL_DEPTH_COMPONENT16, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, _msaaDepthBuffer);
+
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            NSLog(@"MSAA FBO incomplete status=0x%x samples=%d, fallback no-AA", status, _msaaSamples);
+            _useMSAA = NO;
+            _msaaSamples = 0;
+            if (_msaaColorBuffer) { glDeleteRenderbuffers(1, &_msaaColorBuffer); _msaaColorBuffer = 0; }
+            if (_msaaDepthBuffer) { glDeleteRenderbuffers(1, &_msaaDepthBuffer); _msaaDepthBuffer = 0; }
+            if (_msaaFrameBuffer) { glDeleteFramebuffers(1, &_msaaFrameBuffer); _msaaFrameBuffer = 0; }
+        } else {
+            _frameBuffer = _msaaFrameBuffer;
+        }
+    }
+
+    if (!_useMSAA) {
+        glGenRenderbuffers(1, &_depthRenderBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, _depthRenderBuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width, height);
+        glBindFramebuffer(GL_FRAMEBUFFER, _resolveFrameBuffer);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, _depthRenderBuffer);
+        _frameBuffer = _resolveFrameBuffer;
+    }
+
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderBuffer);
-    
-    // Check FBO status
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (_useMSAA) {
+        glBindFramebuffer(GL_FRAMEBUFFER, _msaaFrameBuffer);
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    }
     if (status != GL_FRAMEBUFFER_COMPLETE) {
-        NSLog(@"Error: Frame buffer is not completed. status=0x%x size=%dx%d", status, width, height);
+        NSLog(@"Error: Frame buffer is not completed. status=0x%x size=%dx%d msaa=%d",
+              status, width, height, _msaaSamples);
         return;
     }
+    NSLog(@"SCRender FBO %dx%d scale=%.1f msaa=%dx quality=%ld",
+          width, height, _eaglLayer.contentsScale, _msaaSamples, (long)self.quality);
 }
 
 @end
