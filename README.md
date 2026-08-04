@@ -10,17 +10,38 @@
 
 同步核心是：**视频跟音频走**（`AV_SYNC_AUDIO_MASTER`）。
 
-- `diff = 视频帧 pts − 音频时钟`
-- 用 ffplay 同款思路修正 `delay`（落后缩短等待，超前翻倍或补 `diff`）
-- 阈值建议对齐 ffplay：`sync_threshold` 夹在约 40ms～100ms，`framedup` 约 100ms
+```text
+diff = 视频帧 pts − 音频时钟
+```
 
-常见误区：
+### 非异常时，`diff > 0`（视频超前）
+
+直觉上：**再等 `diff` 就可以对齐音频再播**。
+
+但若每次都把等待改成「刚好等于 `diff`」或猛加一大截，画面会一卡一顿。为了**平滑**，不是裸等 `diff`，而是在帧间隔 `delay` 上做修正（对齐 ffplay）：
+
+| 情况 | 做法 | 用意 |
+|------|------|------|
+| `diff >= sync_threshold` 且 `delay > framedup(≈100ms)` | `delay = delay + diff` | 长帧：把超前量补进等待 |
+| `diff >= sync_threshold` 且短帧 | `delay = 2 * delay` | 不一次吃满 `diff`，先拉长一帧显示，慢慢对齐 |
+| `\|diff\|` 小于阈值 | 不改 `delay` | 小误差当噪声，避免抖 |
+
+所以：**目标仍是消化掉超前的 `diff`，手段是改 `delay` 做渐进，而不是「睡眠 = diff」一刀切。**
+
+### `diff < 0`（视频落后）
+
+同样为平滑：`delay = max(0, delay + diff)`，缩短等待慢慢追，而不是 delay 直接清零跳播。
+
+阈值建议：`sync_threshold` 夹在约 40ms～100ms，`framedup` 约 100ms；`|diff|` 过大（不连续）则放弃本次修正。
+
+### 常见误区
 
 | 误区 | 后果 |
 |------|------|
 | 用墙钟硬睡「固定帧间隔」当同步 | 音频一抖视频就漂 |
-| 把 `display_busy` / GL 完成状态掺进同步计算 | 渲染一慢，整条刷新被拖死，像又回到「等 UI 出队」 |
-| `actual_delay < 某最小值` 就丢帧不显示 | 到点该画的帧反而被扔掉（和「太晚」语义反了） |
+| `diff > 0` 就 `sleep(diff)`，不做平滑 | 超前时顿挫明显 |
+| 把 `display_busy` / GL 完成状态掺进同步计算 | 渲染一慢，整条刷新被拖死 |
+| `actual_delay < 某最小值` 就丢帧不显示 | 到点该画的帧反而被扔掉 |
 | 启动阶段音频时钟还是 `NAN` 就狂追 | 开头乱丢帧 / 乱加速 |
 
 原则：**同步只认 pts 与主时钟；显示忙只影响「这帧送不送 GL」，不要卡住 `pictq` 推进节奏。**
@@ -90,22 +111,38 @@
 
 ## 5. 音频时间的计算
 
-音频时钟不能只用「最近一包解码 pts」。播放器和 AudioQueue 里还有未播完的 PCM。
+**当前播放时刻 = 本帧 pts + 已经消耗掉的时长**（不是「解码到哪就算播到哪」）。
 
-本工程近似：
+概念上：
 
 ```text
+play_time = frame_pts + consumed_duration
+```
+
+其中 `consumed_duration` 来自：本帧 PCM 里已经交给硬件并播完的部分。
+
+本工程实现上等价写成「帧结束时刻 − 尚未播完」：
+
+```text
+audio_clock 存的是：frame_pts + 本帧时长   （本帧结束点）
+
 get_audio_clock ≈
-    audio_clock(本帧结束 pts)
+    audio_clock
   − 软件缓冲未读字节耗时
   − AudioQueue 中未播完字节耗时
+```
+
+也就是：
+
+```text
+结束点 − 剩余未播  ≡  起点 pts + 已消耗
 ```
 
 坑点：
 
 - 单位要统一（本工程视频/音频时钟均用 **ms**）
 - 启动时 `audio_clock` 可能是 `NAN`，视频侧要等时钟建立再追
-- 只记写入 pts、不扣缓冲，视频会系统性偏快或偏慢
+- 只用 `frame_pts`、不加已消耗 / 不扣未播完，视频会系统性偏快或偏慢
 - `bytes_per_sec` 要按**实际输出格式**（如 S16 × 通道 × 采样率），和解码后重采样格式不一致会算歪
 
 视频同步里的 `ref_clock` 应走 `get_master_clock()` → 音频主时钟时即 `get_audio_clock()`。
