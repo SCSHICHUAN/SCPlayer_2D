@@ -167,3 +167,53 @@ SCPlayer_2D/
 ```
 
 入口：`scplayer()`；视频帧通过 `frame_call_bacl` 交给上层渲染。
+
+---
+
+## 7. 近期开发改动总结
+
+### 播放核心
+
+| 项 | 说明 |
+|----|------|
+| 送显解耦 | 去掉 `frame_display_pending`；`video_display` 里 `av_frame_clone` 后立刻出队，回调只 `av_frame_free` |
+| `display_busy` | 放在 `VideoState`，只决定是否送 GL，**不参与** delay / 同步计算；忙则出队丢显 |
+| 同步 | 对齐 ffplay：`sync_threshold` 夹 delay，落后 `delay+diff`，超前长帧补 diff、短帧 `2*delay` |
+| 休眠 | `delay_video_time` 与 `sc_delay_ms` 统一为 `double`（ms） |
+| 换片 | `scplayer_stop` 停旧实例；`clearDisplay` 清黑屏；避免旧帧/旧 busy 残留 |
+| 旋转 | 读流 `displaymatrix` / `rotate` → `video_rotate` → `SCRender.rotateDegrees` |
+| 网络 | `avformat_network_init`；支持 URL 播放；Info.plist 放开 ATS |
+
+### 渲染 / UI
+
+| 项 | 说明 |
+|----|------|
+| 全屏 | `SCRender` 铺满屏幕 |
+| 控件风格 | 半透明黑底圆角按钮（对齐 GL-ARKit / `SCDropdownButton`） |
+| 显隐 | 点屏幕中心区域切换控件栏 |
+| `fillMode` | 等比例（letterbox）/ 拉伸铺满 |
+| 画质 | 流畅 / 均衡 / 高清 / 超清 → `contentsScale`（超清可高于屏密度，上限 4） |
+| 抗锯齿 | 独立档位：关 / 2x / 4x / 8x（按 `GL_MAX_SAMPLES` 封顶）；MSAA FBO + blit 再 present |
+| URL | 输入框 +「播放URL」，可播 http(s)/rtmp/rtsp 等 |
+
+### 接入约定（回调）
+
+1. `flag==1` 收到的是**已克隆**的 `AVFrame*`，用完必须 `av_frame_free`
+2. 显示完成必须把 `is->display_busy = 0`
+3. 不要在回调里再 `fream_queue_pop`（队已在模块侧出完）
+
+### 局域网直播联调（SRS）
+
+本机 SRS 常见口：`1935` RTMP、`8080` HTTP-FLV、`1985` API。
+
+推流示例（文件环推，自行在终端执行）：
+
+```bash
+ffmpeg -re -stream_loop -1 -i "/path/to/video.mp4" \
+  -c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -g 60 -b:v 4000k \
+  -c:a aac -ar 44100 -b:a 128k \
+  -f flv rtmp://<局域网IP>/live/desktop
+```
+
+播放地址示例：`rtmp://<局域网IP>/live/desktop`  
+（桌面采屏推流需给「终端」开 macOS 屏幕录制权限，否则可能被 `killed`。）
