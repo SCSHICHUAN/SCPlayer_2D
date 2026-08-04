@@ -42,9 +42,9 @@
 #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, VIDEO_PICTURE_QUEUE_SIZE)
 /*让线程挂起休眠；入参单位：毫秒 (ms)
  1 秒 = 1000 毫秒 (ms) = 1000000 微秒 (μs)*/
-static inline void sc_delay_ms(int ms) {
+static inline void sc_delay_ms(double ms) {
     if (ms > 0) {
-        usleep((useconds_t)ms * 1000u);
+        usleep((useconds_t)(ms * 1000.0));
     }
 }
 
@@ -200,9 +200,9 @@ typedef struct VideoState{
     struct SwsContext *sws_ctx; //视频重采样
     FrameQueue      pictq;      //储存解码后的视频帧
     int width, height, xleft, ytop;//视频在SDL窗口位置和大小
-    uint32_t   delay_video_time; // 刷新线程休眠时长（ms）
+    double         delay_video_time; // 刷新线程休眠时长（ms）
     double         frame_duration;//视频帧持续时间（ms）
-    int            frame_display_pending; /* 1=当前队头已送显，等 UI 出队后再算下一帧 */
+    int            display_busy; /* 仅送显门闩：模块置 1，接入方完成显示后清 0；不参与同步 */
     int            hw_video; /* 1=VideoToolbox 硬解已启用（get_format 确认后） */
     enum AVPixelFormat hw_pix_fmt; /* 硬解目标像素格式（一般为 AV_PIX_FMT_VIDEOTOOLBOX） */
     int            hw_fallback; /* 1=VT session 失败，需重开软解并重送当前包 */

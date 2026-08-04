@@ -581,7 +581,7 @@ int stream_component_open(VideoState *is,int stream_index){
         /* 帧间隔由流 fps 计算；拿不到则 SC_DEFAULT_FRAME_DURATION_MS(40ms≈25fps) */
         is->frame_duration = sc_frame_duration_from_stream(is->ic, st);
         is->frame_last_delay = is->frame_duration;
-        is->frame_display_pending = 0;
+        is->display_busy = 0;
         is->video_current_pts_time = sc_gettime_ms();//记下 pts 时的墙钟（ms）
         av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms\n", is->frame_duration);
 
@@ -851,7 +851,7 @@ static void do_exit(VideoState *is){
 static void video_refresh_loop(VideoState *is){
     for(;;){
         video_refresh_timer(is);
-//        sc_delay_ms(is->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
+        sc_delay_ms(is->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
     }
     
 }

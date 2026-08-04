@@ -232,12 +232,30 @@ double get_video_clock(VideoState *is){
 
 
 
+/* 克隆后立即出队，与同步无关；busy 时丢弃本帧拷贝，不卡住刷新 */
 static void video_display(VideoState *is){
-    Frame *vp = NULL;
-    AVFrame *frame = NULL;
+    Frame *vp;
+    AVFrame *owned;
+
+    if (is->pictq.size == 0 || !is->fn_call) {
+        return;
+    }
+    /* GL 忙：照样出队，不送显，避免拖慢同步/解码 */
+    if (is->display_busy) {
+        fream_queue_pop(&is->pictq);
+        return;
+    }
     vp = frame_queue_peek(&is->pictq);
-    frame = vp->frame;
-    is->fn_call(frame,1,is,is->userData);
+    if (!vp || !vp->frame) {
+        return;
+    }
+    owned = av_frame_clone(vp->frame);
+    fream_queue_pop(&is->pictq);
+    if (!owned) {
+        return;
+    }
+    is->display_busy = 1;
+    is->fn_call(owned, 1, is, is->userData);
 }
 
 /* 视频落后超过约 1s 开始狂追 */
@@ -275,49 +293,31 @@ void video_refresh_timer(void *userdata){
     
     if(is->video_st){
         
-        if(is->pictq.size == 0){
-            //如果视频queue是空的，延时1毫秒 快速的检测
+        if(is->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
             is->delay_video_time = 1;// 1ms 调用
-            is->frame_display_pending = 0;
-        } else if (is->frame_display_pending) {
-            /* 队头已送显：不再重复累加 delay，只按 frame_timer 等到点 / 等 GL 出队 */
-//            actual_delay = is->frame_timer - sc_gettime_ms();
-//            if (actual_delay < 1.0) {
-//                actual_delay = 1.0;
-//            }
-//            is->delay_video_time = (uint32_t)(actual_delay + 0.5);
-        } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {
-            /* 音频时钟尚未建立：先别开跑，避免启动阶段乱追 */
+        } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {//音频时钟尚未建立：先别开跑，避免启动阶段乱追
             is->delay_video_time = 5;
         } else {
             /* 若已明显落后，先丢到接近音频再算 delay */
 //            video_drop_late_frames(is, frame_ms);
-            if (is->pictq.size == 0) {
-                is->delay_video_time = 1;
-                return;
-            }
+           
             
             //计算下一帧的显示时间
-            
             vp = frame_queue_peek(&is->pictq);//读起视频帧
-            
-            //            printf("PTS = %f ms\n",vp->pts);
-            
-            is->video_current_pts = vp->pts;//对is的域赋值，将要播放的视频帧的pts
+            // printf("PTS = %f ms\n",vp->pts);
+            is->video_current_pts = vp->pts;//对is的赋值，将要播放的视频帧的pts
             is->video_current_pts_time = sc_gettime_ms();//但前时钟（ms）
             
             if(is->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
                 delay = frame_ms;
             } else {
-                //将要播放的一帧和上一帧的时间间隔（ms）
-                delay = vp->pts - is->frame_last_pts;
+                delay = vp->pts - is->frame_last_pts;//将要播放的一帧和上一帧的时间间隔（ms）
             }
             
             /* 非法间隔：<=0 或 >=1s(1000ms) 时回退到上一帧 delay，再不行用 fps 帧间隔 */
             if(delay <= 0 || delay >= 1000.0){
                 delay = (is->frame_last_delay > 0) ? is->frame_last_delay : frame_ms;
             }
-            
             //跟新frame_last_delay，frame_last_pts
             is->frame_last_delay = delay;
             is->frame_last_pts = vp->pts;
@@ -330,38 +330,30 @@ void video_refresh_timer(void *userdata){
             
             /* Skip or repeat the frame. Take delay into account
              FFPlay still doesn't "know if this is the best guess."
+             对齐 ffplay compute_target_delay（本工程时间单位为 ms）
              
-             sync_threshold
-             
-             视频将要播放帧  -  音频时间        视频将要播放帧  -  上一帧
-             vp->pts - ref_clock            vp->pts - is->frame_last_pts
-             |                              |
-             diff                            delay
-             
-             ---------------- 0 ---------------> x
-             -3      -1           1       3
-             diff   delay        delay   diff
-             
-             以diff为准来修正delay（单位均为 ms）
+             sync_threshold = clamp(delay, 40ms, 100ms)
+             落后：delay = max(0, delay + diff)
+             超前且 delay > 100ms：delay += diff（长帧直接补差，不翻倍）
+             超前且 delay <= 100ms：delay *= 2（短帧用翻倍拉长显示）
              */
+            const double sync_threshold_min = 40.0;   /* AV_SYNC_THRESHOLD_MIN  0.04s */
+            const double sync_threshold_max = 100.0;  /* AV_SYNC_THRESHOLD_MAX  0.1s  */
+            const double framedup_threshold = 100.0;  /* AV_SYNC_FRAMEDUP_THRESHOLD 0.1s */
+            const double nosync_threshold = 10000.0;  /* AV_NOSYNC_THRESHOLD 10s */
             
-            
-            const double nosync_threshold = 10000.0; /* |diff| 过大视为不连续，放弃同步 */
-            double max_delay = frame_ms * 2.0;       /* 超前最多多等约 2 帧，避免 delay 飙到 100ms+ */
-            
-            /* 同步阈值取半帧：30fps→≈16.7ms；拿不到 fps 时半默认帧→20ms */
-            sync_threshold = frame_ms * 0.5;
+            sync_threshold = FFMAX(sync_threshold_min, FFMIN(sync_threshold_max, delay));
             
             if (!isnan(diff) && fabs(diff) < nosync_threshold) {
                 if (diff <= -sync_threshold) {
-                    /* 视频落后：缩短等待（大落后已在 video_drop_late_frames 处理） */
-                    delay = FFMAX(0.0, delay + diff);
-                } else if (diff >= sync_threshold) {
-                    /* 视频超前：多等 diff，对齐音频（替代原来的 2*delay） */
+                    /* 视频落后：缩短等待 */
+                    delay = FFMAX(0.0, delay + diff);//慢一点追平滑,不要一下跳过去
+                } else if (diff >= sync_threshold && delay > framedup_threshold) {
+                    /* 长帧超前：直接加上 diff */
                     delay = delay + diff;
-                    if (delay > max_delay) {
-                        delay = max_delay;
-                    }
+                } else if (diff >= sync_threshold) {
+                    /* 短帧超前：翻倍等待（重复显示） */
+                    delay = 2.0 * delay;
                 }
             }
             
@@ -374,33 +366,11 @@ void video_refresh_timer(void *userdata){
              如果发现要播放的帧的时间落后于系统时间就将其播放出来。
              */
             actual_delay = is->frame_timer - sc_gettime_ms();
-            {
-                /* 最短休眠：取帧间隔的 1/4，至少 1ms */
-                double min_sleep = frame_ms * 0.25;
-                int too_late;
-                
-                if (min_sleep < 1.0) {
-                    min_sleep = 1.0;
-                }
-                too_late = (actual_delay < min_sleep);
-                if (too_late) {
-                    actual_delay = min_sleep;
-                }
-                
-                is->delay_video_time = (uint32_t)(actual_delay + 0.5);
-                
-                if(too_late){
-                    fream_queue_pop(&is->pictq);//时间太短不渲染
-                    /* 丢掉 timer 欠债，避免连续 too_late 把后续帧全丢光再冲过音频 */
-                    is->frame_timer = sc_gettime_ms();
-                    is->frame_display_pending = 0;
-                    is->delay_video_time = 1;
-                }else{
-                    video_display(is);
-                    /* GL 异步上传纹理，出队在回调里；期间勿重复处理同一帧 */
-                    is->frame_display_pending = 1;
-                }
+            if (actual_delay < 0) {
+                actual_delay = 0;
             }
+            is->delay_video_time = actual_delay;
+            video_display(is);
         }
         
     } else {

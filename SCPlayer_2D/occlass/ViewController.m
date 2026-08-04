@@ -49,12 +49,21 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             [vc initAudio:opaque];
         });
     }else if(flag == 1){
+        /* 模块已占 display_busy；接入方只负责：释放拷贝 + 清 busy */
+        VideoState *is = (VideoState *)opaque;
+        if (!frame) {
+            if (is) {
+                is->display_busy = 0;
+            }
+            return 0;
+        }
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
-            VideoState *is = (VideoState*)opaque;
-            /* 无论成功与否都出队并解除 pending，避免刷新线程卡在同一帧 */
-            fream_queue_pop(&is->pictq);
-            is->frame_display_pending = 0;
             (void)success;
+            AVFrame *owned = frame;
+            av_frame_free(&owned);
+            if (is) {
+                is->display_busy = 0;
+            }
         }];
     }
     

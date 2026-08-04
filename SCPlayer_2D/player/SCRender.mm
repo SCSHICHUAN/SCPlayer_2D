@@ -9,6 +9,7 @@
 #import "SCRender.h"
 #import <OpenGLES/ES3/glext.h>
 #import <GLKit/GLKit.h>
+#import <QuartzCore/QuartzCore.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -20,6 +21,11 @@
 
 
 #import "JpegUtil.h"
+
+/* 毫秒：CACurrentMediaTime 单位是秒 */
+static inline double sc_gl_now_ms(void) {
+    return CACurrentMediaTime() * 1000.0;
+}
 
 // camera
 Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
@@ -94,7 +100,14 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
     glView.context = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
     [EAGLContext setCurrentContext:glView.context];
     [self addSubview:glView];
-    _eaglLayer = glView.layer;
+    _eaglLayer = (CAEAGLLayer *)glView.layer;
+    /* 实测：scale=2 时 FBO≈828x1472，YUV 全屏 draw≈38ms；改为 1 降填充量 */
+    glView.contentScaleFactor = 1.0;
+    _eaglLayer.contentsScale = 4.0;
+    _eaglLayer.drawableProperties = @{
+        kEAGLDrawablePropertyRetainedBacking : @NO,
+        kEAGLDrawablePropertyColorFormat : kEAGLColorFormatRGBA8
+    };
     [self setupFrameAndRenderBuffer];
 }
 
@@ -242,8 +255,12 @@ glm::mat4 view = glm::mat4(1.0f);
 
 - (void)displayWithFrame:(AVFrame *)yuvFrame bb:(void (^)(BOOL success))completionBlock{
     
-    if (yuvFrame == NULL) return;
+    if (yuvFrame == NULL) {
+        if (completionBlock) completionBlock(NO);
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
+        [EAGLContext setCurrentContext:self->glView.context];
         int videoWidth = yuvFrame->width;
         int videoHeight = yuvFrame->height;
         
@@ -267,13 +284,25 @@ glm::mat4 view = glm::mat4(1.0f);
         // 关键：计算宽向校正因子（有效宽度 / 实际行间距）
         float yScaleX = (float)videoWidth / yStride;    // Y分量水平校正
         float uvScaleX = (float)uvWidth / uStride;      // U/V分量水平校正
+        (void)uvScaleX;
         
+        glBindFramebuffer(GL_FRAMEBUFFER, self->_frameBuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, self->_colorRenderBuffer);
         
-        // 初始化GL状态
+        // 用 fence 等 GPU，避免 draw 测成 0.00
+        double t0 = sc_gl_now_ms();
+        
         glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(self->_glProgram);
+        {
+            GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+            glDeleteSync(s);
+        }
+        double t_c1 = sc_gl_now_ms();
         
         // 绑定Y纹理
         glActiveTexture(GL_TEXTURE0);
@@ -310,34 +339,54 @@ glm::mat4 view = glm::mat4(1.0f);
                      vStride, uvHeight, 0,
                      GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[2]);
         glUniform1i(glGetUniformLocation(self->_glProgram, "vTexture"), 2);
+        {
+            GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+            glDeleteSync(s);
+        }
+        double t_u1 = sc_gl_now_ms();
         
-       
-        
-        // 保持旋转矩阵
+        // 180° + 水平镜像（左右翻转）
         glm::mat4 projection = glm::mat4(1.0f);
         glm::mat4 view = glm::mat4(1.0f);
         glm::mat4 model = glm::mat4(1.0f);
         model = glm::rotate(model, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        model = glm::scale(model, glm::vec3(-1.0f, 1.0f, 1.0f));
         
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "projection"), 1, GL_FALSE, &projection[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "view"), 1, GL_FALSE, &view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "model"), 1, GL_FALSE, &model[0][0]);
         
-        
-        //YUV的宽度没有渲染的宽度一样时拉伸x坐标
         float videoToRenderRatio = yScaleX;
         glUniform1f(glGetUniformLocation(self->_glProgram, "videoToRenderRatio"), videoToRenderRatio);
-       
         
-        // 绘制
         glBindVertexArray(self->_VAO);
+        double t_d0 = sc_gl_now_ms();
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        {
+            GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+            glDeleteSync(s);
+        }
+        double t_d1 = sc_gl_now_ms();
         
-        // 呈现结果
+        double t_p0 = sc_gl_now_ms();
         [self->glView.context presentRenderbuffer:GL_RENDERBUFFER];
+        {
+            GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
+            glDeleteSync(s);
+        }
+        double t_p1 = sc_gl_now_ms();
+        
+        double clear_ms = t_c1 - t0;
+        double upload_ms = t_u1 - t_c1;
+        double draw_ms = t_d1 - t_d0;
+        double present_ms = t_p1 - t_p0;
+        double total_ms = t_p1 - t0;
+        printf("GL: clear=%.3f ms | upload=%.3f ms | draw=%.3f ms | present=%.3f ms | total=%.3f ms\n",
+               clear_ms, upload_ms, draw_ms, present_ms, total_ms);
         if (completionBlock) completionBlock(YES);
-        
-        
     });
 }
 
@@ -354,9 +403,14 @@ glm::mat4 view = glm::mat4(1.0f);
     [glView.context renderbufferStorage:GL_RENDERBUFFER fromDrawable:_eaglLayer];
     
     // Setup depth render buffer
-    int width, height;
+    GLint width = 0, height = 0;
     glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
     glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
+    if (width <= 0 || height <= 0) {
+        NSLog(@"Error: renderbuffer size is %dx%d (layer bounds=%@ scale=%.1f)",
+              width, height, NSStringFromCGRect(_eaglLayer.bounds), _eaglLayer.contentsScale);
+        return;
+    }
     
     glViewport(0, 0, width, height);
     
@@ -379,11 +433,11 @@ glm::mat4 view = glm::mat4(1.0f);
     // Set color render buffer as current render buffer
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderBuffer);
     
-    // Check FBO satus
+    // Check FBO status
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
-        NSLog(@"Error: Frame buffer is not completed.");
-        exit(1);
+        NSLog(@"Error: Frame buffer is not completed. status=0x%x size=%dx%d", status, width, height);
+        return;
     }
 }
 
