@@ -304,8 +304,11 @@ void video_refresh_timer_tmp(void *userdata){
             ref_clock = get_maste_clock(is);//播放到的音频时刻（ms）
             diff = vp->pts - ref_clock;
             is->delay_video_time = diff;
-            printf("diff = %.2f ms \n",diff);
+            if(diff <= 0){
+                diff = 0;
+            }
             video_display(is);
+            printf("diff = %.2f ms \n",diff);
         }
     } else {
         is->delay_video_time = 100;//等待打开视频流

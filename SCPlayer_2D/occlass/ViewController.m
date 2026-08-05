@@ -386,11 +386,26 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     urlField.keyboardType = UIKeyboardTypeURL;
     urlField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     urlField.autocorrectionType = UITextAutocorrectionTypeNo;
-    urlField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    /* 系统 clear 按钮在深色底上看不见，改用自定义白色 × */
+    urlField.clearButtonMode = UITextFieldViewModeNever;
     urlField.returnKeyType = UIReturnKeyGo;
     urlField.layer.cornerRadius = 8;
     urlField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
     urlField.leftViewMode = UITextFieldViewModeAlways;
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    clearBtn.frame = CGRectMake(0, 0, 28, 28);
+    if (@available(iOS 13.0, *)) {
+        UIImage *img = [UIImage systemImageNamed:@"xmark.circle.fill"];
+        [clearBtn setImage:img forState:UIControlStateNormal];
+    } else {
+        [clearBtn setTitle:@"✕" forState:UIControlStateNormal];
+        clearBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    }
+    clearBtn.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    [clearBtn setTitleColor:[UIColor colorWithWhite:1 alpha:0.85] forState:UIControlStateNormal];
+    [clearBtn addTarget:self action:@selector(clearURLField) forControlEvents:UIControlEventTouchUpInside];
+    urlField.rightView = clearBtn;
+    urlField.rightViewMode = UITextFieldViewModeWhileEditing;
     urlField.delegate = self;
     self.urlField = urlField;
 
@@ -493,6 +508,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         return NO;
     }
     return YES;
+}
+
+-(void)clearURLField{
+    self.urlField.text = @"";
 }
 
 -(void)toggleControlsVisibility{
