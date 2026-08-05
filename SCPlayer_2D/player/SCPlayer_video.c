@@ -286,8 +286,36 @@ static void video_drop_late_frames(VideoState *is, double frame_ms)
     }
 }
 
+void video_refresh_timer_tmp(void *userdata){
+    
+    VideoState *is = (VideoState*)userdata;
+    Frame *vp = NULL;
+    double diff,ref_clock = 0;
+    
+    if(is->video_st){
+        
+        if(is->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
+            is->delay_video_time = 1;// 1ms 调用
+        } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {
+            is->delay_video_time = 5;//音频时钟尚未建立：先别开跑，避免启动阶段乱追
+        } else {
+            //下一帧视频播放时间
+            vp = frame_queue_peek(&is->pictq);//读起视频帧
+            ref_clock = get_maste_clock(is);//播放到的音频时刻（ms）
+            diff = vp->pts - ref_clock;
+            is->delay_video_time = diff;
+            printf("diff = %.2f ms \n",diff);
+            video_display(is);
+        }
+    } else {
+        is->delay_video_time = 100;//等待打开视频流
+    }
+    
+}
+
 //刷新视频帧
 void video_refresh_timer(void *userdata){
+    return video_refresh_timer_tmp(userdata);
     
     VideoState *is = (VideoState*)userdata;
     Frame *vp = NULL;

@@ -22,6 +22,7 @@
 #import "SCAudioQueuePlayer.h"
 #import "SCDropdownButton.h"
 
+static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 
 @interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate>
 @property(nonatomic,assign)BOOL end;
@@ -36,6 +37,10 @@
 @property(nonatomic,strong)SCDropdownButton *qualityDropdown;
 @property(nonatomic,strong)SCDropdownButton *msaaDropdown;
 @property(nonatomic,strong)UITextField *urlField;
+@property(nonatomic,strong)UIButton *videoPauseBtn;
+@property(nonatomic,strong)UIButton *audioPauseBtn;
+@property(nonatomic,strong)UIButton *avPauseBtn;
+@property(nonatomic,assign)BOOL audioPaused;
 @property(nonatomic,strong)UIView *controlsBar;
 @property(nonatomic,assign)BOOL controlsVisible;
 @property(nonatomic,assign)VideoState *playingIs;
@@ -46,6 +51,13 @@
 -(void)stopCurrentPlayback;
 -(void)toggleRenderMode;
 -(void)updateModeButtonTitle;
+-(void)toggleVideoPause;
+-(void)updateVideoPauseButtonTitle;
+-(void)toggleAudioPause;
+-(void)updateAudioPauseButtonTitle;
+-(void)toggleAVPause;
+-(void)updateAVPauseButtonTitle;
+-(void)updateAllPauseButtonTitles;
 -(UIButton *)makeButton:(NSString *)title action:(SEL)action;
 -(void)buildControls;
 -(void)toggleControlsVisibility;
@@ -105,15 +117,19 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.audioPlayer = [[SCAudioQueuePlayer alloc] init];
     [self.audioPlayer initializeAudioQueue:is];
     [self.audioPlayer play];
+    self.audioPaused = NO;
+    [self updateAllPauseButtonTitles];
 }
 
 -(void)stopCurrentPlayback{
     VideoState *is = self.playingIs;
     self.playingIs = NULL;
+    self.audioPaused = NO;
     [self.audioPlayer stop];
     self.audioPlayer = nil;
     self.cRender.rotateDegrees = 0;
     [self.cRender clearDisplay];
+    [self updateAllPauseButtonTitles];
     if (is) {
         is->display_busy = 0;
         scplayer_stop(is);
@@ -179,7 +195,12 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 }
 
 -(void)playURLFromField{
-    [self startPlayWithPath:self.urlField.text];
+    NSString *url = [self.urlField.text stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (url.length > 0) {
+        [[NSUserDefaults standardUserDefaults] setObject:url forKey:kSCLastPlayURLKey];
+    }
+    [self startPlayWithPath:url];
 }
 
 -(void)testClick2{
@@ -201,6 +222,80 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         ? @"等比例"
         : @"拉伸铺满";
     [self.modeBtn setTitle:title forState:UIControlStateNormal];
+}
+
+-(void)toggleVideoPause{
+    VideoState *is = self.playingIs;
+    if (!is) {
+        self.lab.text = @"当前没有在播的视频";
+        return;
+    }
+    /* 1=视频暂停（音频继续），0=视频播放 */
+    is->vidoe_stop = is->vidoe_stop ? 0 : 1;
+    [self updateAllPauseButtonTitles];
+}
+
+-(void)updateVideoPauseButtonTitle{
+    VideoState *is = self.playingIs;
+    BOOL paused = (is && is->vidoe_stop == 1);
+    [self.videoPauseBtn setTitle:(paused ? @"V播放" : @"V暂停") forState:UIControlStateNormal];
+}
+
+-(void)toggleAudioPause{
+    if (!self.playingIs || !self.audioPlayer) {
+        self.lab.text = @"当前没有在播的音频";
+        return;
+    }
+    if (self.audioPaused) {
+        [self.audioPlayer resume];
+        self.audioPaused = NO;
+    } else {
+        [self.audioPlayer pause];
+        self.audioPaused = YES;
+    }
+    [self updateAllPauseButtonTitles];
+}
+
+-(void)updateAudioPauseButtonTitle{
+    [self.audioPauseBtn setTitle:(self.audioPaused ? @"A播放" : @"A暂停")
+                        forState:UIControlStateNormal];
+}
+
+-(void)toggleAVPause{
+    VideoState *is = self.playingIs;
+    if (!is) {
+        self.lab.text = @"当前没有在播的内容";
+        return;
+    }
+    BOOL paused = (is->vidoe_stop == 1) && self.audioPaused;
+    if (paused) {
+        /* 同步恢复音视频 */
+        is->vidoe_stop = 0;
+        if (self.audioPlayer) {
+            [self.audioPlayer resume];
+        }
+        self.audioPaused = NO;
+    } else {
+        /* 同步暂停音视频 */
+        is->vidoe_stop = 1;
+        if (self.audioPlayer) {
+            [self.audioPlayer pause];
+        }
+        self.audioPaused = YES;
+    }
+    [self updateAllPauseButtonTitles];
+}
+
+-(void)updateAVPauseButtonTitle{
+    VideoState *is = self.playingIs;
+    BOOL paused = (is && is->vidoe_stop == 1 && self.audioPaused);
+    [self.avPauseBtn setTitle:(paused ? @"播放" : @"暂停") forState:UIControlStateNormal];
+}
+
+-(void)updateAllPauseButtonTitles{
+    [self updateVideoPauseButtonTitle];
+    [self updateAudioPauseButtonTitle];
+    [self updateAVPauseButtonTitle];
 }
 
 /* 与 GL-ARKit makeButton 同风格：半透明黑底 + 白字 + 圆角 */
@@ -299,10 +394,31 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     urlField.delegate = self;
     self.urlField = urlField;
 
+    NSString *savedURL = [[NSUserDefaults standardUserDefaults] stringForKey:kSCLastPlayURLKey];
+    if (savedURL.length > 0) {
+        urlField.text = savedURL;
+    }
+
     UIButton *urlPlayBtn = [self makeButton:@"播放URL" action:@selector(playURLFromField)];
     urlPlayBtn.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIButton *videoPauseBtn = [self makeButton:@"V暂停" action:@selector(toggleVideoPause)];
+    videoPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.videoPauseBtn = videoPauseBtn;
+
+    UIButton *audioPauseBtn = [self makeButton:@"A暂停" action:@selector(toggleAudioPause)];
+    audioPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.audioPauseBtn = audioPauseBtn;
+
+    UIButton *avPauseBtn = [self makeButton:@"暂停" action:@selector(toggleAVPause)];
+    avPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.avPauseBtn = avPauseBtn;
+
     [bar addSubview:urlField];
     [bar addSubview:urlPlayBtn];
+    [bar addSubview:videoPauseBtn];
+    [bar addSubview:audioPauseBtn];
+    [bar addSubview:avPauseBtn];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -310,8 +426,14 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [bar.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
         [bar.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
 
+        /* 第1行：提示信息 */
+        [lab.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
+        [lab.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
+        [lab.topAnchor constraintEqualToAnchor:bar.topAnchor constant:8],
+
+        /* 第2行：本地 / 相册 / 显示模式 / 画质 */
         [startBtn.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
-        [startBtn.topAnchor constraintEqualToAnchor:bar.topAnchor constant:10],
+        [startBtn.topAnchor constraintEqualToAnchor:lab.bottomAnchor constant:8],
         [startBtn.heightAnchor constraintEqualToConstant:36],
 
         [albumBtn.leadingAnchor constraintEqualToAnchor:startBtn.trailingAnchor constant:8],
@@ -325,13 +447,26 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [qualityDrop.leadingAnchor constraintEqualToAnchor:modeBtn.trailingAnchor constant:8],
         [qualityDrop.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
 
+        /* 第3行：抗锯齿 + V/A/同步暂停 */
         [msaaDrop.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
         [msaaDrop.topAnchor constraintEqualToAnchor:startBtn.bottomAnchor constant:8],
 
-        [lab.leadingAnchor constraintEqualToAnchor:msaaDrop.trailingAnchor constant:8],
-        [lab.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
-        [lab.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
+        [videoPauseBtn.leadingAnchor constraintEqualToAnchor:msaaDrop.trailingAnchor constant:8],
+        [videoPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
+        [videoPauseBtn.heightAnchor constraintEqualToConstant:36],
+        [videoPauseBtn.widthAnchor constraintEqualToConstant:64],
 
+        [audioPauseBtn.leadingAnchor constraintEqualToAnchor:videoPauseBtn.trailingAnchor constant:8],
+        [audioPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
+        [audioPauseBtn.heightAnchor constraintEqualToConstant:36],
+        [audioPauseBtn.widthAnchor constraintEqualToConstant:64],
+
+        [avPauseBtn.leadingAnchor constraintEqualToAnchor:audioPauseBtn.trailingAnchor constant:8],
+        [avPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
+        [avPauseBtn.heightAnchor constraintEqualToConstant:36],
+        [avPauseBtn.widthAnchor constraintEqualToConstant:56],
+
+        /* 第4行：URL 独占 */
         [urlField.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
         [urlField.topAnchor constraintEqualToAnchor:msaaDrop.bottomAnchor constant:8],
         [urlField.heightAnchor constraintEqualToConstant:36],
@@ -340,7 +475,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [urlPlayBtn.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
         [urlPlayBtn.centerYAnchor constraintEqualToAnchor:urlField.centerYAnchor],
         [urlPlayBtn.heightAnchor constraintEqualToConstant:36],
-        [urlPlayBtn.widthAnchor constraintGreaterThanOrEqualToConstant:72],
+        [urlPlayBtn.widthAnchor constraintEqualToConstant:88],
 
         [urlField.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-10],
     ]];
@@ -349,6 +484,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.cRender.quality = SCRenderQualityBalanced;
     self.cRender.msaaLevel = SCRenderMSAA4x;
     [self updateModeButtonTitle];
+    [self updateAllPauseButtonTitles];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {

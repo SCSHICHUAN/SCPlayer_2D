@@ -223,6 +223,9 @@ typedef struct VideoState{
     void *userData; // 回调透传给上层，避免全局对象指针
     
     int out_audio_size;
+    
+    //音视频同步测试
+    int vidoe_stop;// 1 视频暂停,0视频播放
 }VideoState;
 
 /* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */

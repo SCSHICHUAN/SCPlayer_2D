@@ -535,8 +535,8 @@ glm::mat4 view = glm::mat4(1.0f);
         double draw_ms = t_d1 - t_d0;
         double present_ms = t_p1 - t_p0;
         double total_ms = t_p1 - t0;
-        printf("GL: clear=%.3f ms | upload=%.3f ms | draw=%.3f ms | present=%.3f ms | total=%.3f ms\n",
-               clear_ms, upload_ms, draw_ms, present_ms, total_ms);
+//        printf("GL: clear=%.3f ms | upload=%.3f ms | draw=%.3f ms | present=%.3f ms | total=%.3f ms\n",
+//               clear_ms, upload_ms, draw_ms, present_ms, total_ms);
         if (completionBlock) completionBlock(YES);
     });
 }

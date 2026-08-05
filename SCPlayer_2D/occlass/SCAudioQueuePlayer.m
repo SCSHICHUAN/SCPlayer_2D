@@ -23,9 +23,6 @@
 #define BUFFER_SIZE (4096 * 4)
 
 
-
-SCAudioQueuePlayer *sc_self;
-
 @implementation SCAudioQueuePlayer{
     AudioQueueRef audioQueue;
     struct FFAudioInformation audioInformation;
@@ -96,12 +93,8 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
 
 
 - (void)initializeAudioQueue:(VideoState *)is {
-    
-    sc_self = self;
     self->is = is;
-    
-    
-    
+
     /// 播放器播放时的ffmpeg采样格式
     /// 指定了播放器在读取数据时的数据长度(一帧多少个字节)
     AudioStreamBasicDescription asbd;
