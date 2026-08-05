@@ -195,6 +195,23 @@ SCPlayer_2D/
 | 画质 | 流畅 / 均衡 / 高清 / 超清 → `contentsScale`（超清可高于屏密度，上限 4） |
 | 抗锯齿 | 独立档位：关 / 2x / 4x / 8x（按 `GL_MAX_SAMPLES` 封顶）；MSAA FBO + blit 再 present |
 | URL | 输入框 +「播放URL」，可播 http(s)/rtmp/rtsp 等 |
+| V 暂停 | `vidoe_stop`：只停视频刷新，音频继续；按钮「V暂停 / V播放」 |
+| A 暂停 | `SCAudioQueuePlayer` 的 `pause` / `resume`；按钮「A暂停 / A播放」 |
+| 同步暂停 | 「暂停 / 播放」同时控视频（`vidoe_stop`）与音频（`pause`/`resume`） |
+
+### 音视频同步测试（现象）
+
+当前刷新走 `video_refresh_timer` → **`video_refresh_timer_tmp`**：
+
+```text
+diff = 视频 pts − 音频主时钟
+立刻 video_display
+再 sc_delay_ms(max(0, diff))
+```
+
+源码里另有一套对齐 ffplay 的 `frame_timer` / `sync_threshold` 实现，但被提前 `return`，**未启用**。
+
+**实测现象**：tmp 路径（`delay ≈ pts−audio`，先显示再按 diff 休眠）比未启用的 ffplay 风格路径更稳、口型/画面更跟手；后者在本工程「先 display 再 sleep」的循环模型下，反而更容易卡顿或追不上。故以 tmp 为准，ffplay 段仅作对照保留。
 
 ### 接入约定（回调）
 
