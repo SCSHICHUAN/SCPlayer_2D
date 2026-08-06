@@ -17,6 +17,7 @@
 #import <OpenGLES/ES3/glext.h>
 #import <GLKit/GLKit.h>
 #import <MobileCoreServices/MobileCoreServices.h>
+#import <PhotosUI/PhotosUI.h>
 #import "SCRender.h"
 #include "SCPlayer.h"
 #import "SCAudioQueuePlayer.h"
@@ -24,7 +25,7 @@
 
 static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 
-@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate>
+@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate>
 @property(nonatomic,assign)BOOL end;
 @property(nonatomic,strong)UILabel *lab;
 @property(nonatomic,assign)NSInteger video_pak_count;
@@ -59,9 +60,18 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 -(void)updateAVPauseButtonTitle;
 -(void)updateAllPauseButtonTitles;
 -(UIButton *)makeButton:(NSString *)title action:(SEL)action;
+-(void)layoutEqualWidthViews:(NSArray<UIView *> *)views
+                       inBar:(UIView *)bar
+                         top:(NSLayoutYAxisAnchor *)topAnchor
+                 topConstant:(CGFloat)topConstant;
+-(CGFloat)fittingWidthForButtonTitle:(NSString *)title;
 -(void)buildControls;
 -(void)toggleControlsVisibility;
 -(void)onCenterTap:(UITapGestureRecognizer *)gr;
+-(NSString *)albumVideosDirectory;
+-(void)clearCopiedAlbumVideos;
+-(void)pickAlbumVideoWithImagePicker;
+-(void)importAndPlayAlbumVideoAtURL:(NSURL *)mediaURL;
 @end
 
 @implementation ViewController
@@ -303,14 +313,80 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     [b setTitle:title forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightSemibold];
+    b.titleLabel.adjustsFontSizeToFitWidth = YES;
+    b.titleLabel.minimumScaleFactor = 0.75;
+    b.titleLabel.lineBreakMode = NSLineBreakByClipping;
     b.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     b.layer.cornerRadius = 8;
     b.contentEdgeInsets = UIEdgeInsetsMake(8, 10, 8, 10);
+    /* 按文字固有宽度，禁止被挤扁截断 */
+    [b setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [b setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                       forAxis:UILayoutConstraintAxisHorizontal];
     if (action) {
         [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     }
     return b;
+}
+
+-(CGFloat)fittingWidthForButtonTitle:(NSString *)title {
+    UIFont *font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightSemibold];
+    CGSize sz = [title sizeWithAttributes:@{NSFontAttributeName: font}];
+    return ceil(sz.width) + 20.0; /* contentEdgeInsets 左右各 10 */
+}
+
+/* 一排最多 4 个：按文字固有宽度左对齐，不等宽、不拉满（布局位置稳定） */
+-(void)layoutEqualWidthViews:(NSArray<UIView *> *)views
+                       inBar:(UIView *)bar
+                         top:(NSLayoutYAxisAnchor *)topAnchor
+                 topConstant:(CGFloat)topConstant {
+    NSUInteger n = views.count;
+    NSAssert(n >= 1 && n <= 4, @"row supports 1..4 controls");
+    UIView *prev = nil;
+    for (NSUInteger i = 0; i < n; i++) {
+        UIView *v = views[i];
+        v.translatesAutoresizingMaskIntoConstraints = NO;
+        [v setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [v setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                           forAxis:UILayoutConstraintAxisHorizontal];
+        NSMutableArray<NSLayoutConstraint *> *cs = [NSMutableArray array];
+        [cs addObject:[v.topAnchor constraintEqualToAnchor:topAnchor constant:topConstant]];
+        [cs addObject:[v.heightAnchor constraintEqualToConstant:36]];
+        if (i == 0) {
+            [cs addObject:[v.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10]];
+        } else {
+            [cs addObject:[v.leadingAnchor constraintEqualToAnchor:prev.trailingAnchor constant:8]];
+        }
+        /* 不贴右缘、不等宽，避免被拉伸；右边界软约束防止超出 bar */
+        NSLayoutConstraint *cap = [v.trailingAnchor constraintLessThanOrEqualToAnchor:bar.trailingAnchor
+                                                                             constant:-10];
+        cap.priority = UILayoutPriorityDefaultHigh;
+        [cs addObject:cap];
+        [NSLayoutConstraint activateConstraints:cs];
+        prev = v;
+    }
+}
+
+-(NSString *)albumVideosDirectory {
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *dir = [docs stringByAppendingPathComponent:@"AlbumVideos"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    return dir;
+}
+
+/* 选新相册视频前清掉本机已拷贝的旧文件 */
+-(void)clearCopiedAlbumVideos {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = [self albumVideosDirectory];
+    NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
+    for (NSString *f in files) {
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
+    }
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"SCPlayer.albumHistory"];
 }
 
 -(void)buildControls{
@@ -325,6 +401,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     UIButton *albumBtn = [self makeButton:@"相册视频" action:@selector(pickAlbumVideo)];
     UIButton *modeBtn = [self makeButton:@"等比例" action:@selector(toggleRenderMode)];
     self.modeBtn = modeBtn;
+    /* 模式标题长短会变，固定为较长文案宽度，避免切换时整行左右晃 */
+    CGFloat modeW = MAX([self fittingWidthForButtonTitle:@"等比例"],
+                        [self fittingWidthForButtonTitle:@"拉伸铺满"]);
+    [modeBtn.widthAnchor constraintEqualToConstant:modeW].active = YES;
 
     SCDropdownButton *qualityDrop =
         [[SCDropdownButton alloc] initWithPrefix:@"画质"
@@ -364,9 +444,6 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     lab.text = @"点屏幕中心可显隐控件";
     self.lab = lab;
 
-    startBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    albumBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    modeBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [bar addSubview:startBtn];
     [bar addSubview:albumBtn];
     [bar addSubview:modeBtn];
@@ -418,15 +495,12 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     urlPlayBtn.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIButton *videoPauseBtn = [self makeButton:@"V暂停" action:@selector(toggleVideoPause)];
-    videoPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
     self.videoPauseBtn = videoPauseBtn;
 
     UIButton *audioPauseBtn = [self makeButton:@"A暂停" action:@selector(toggleAudioPause)];
-    audioPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
     self.audioPauseBtn = audioPauseBtn;
 
     UIButton *avPauseBtn = [self makeButton:@"暂停" action:@selector(toggleAVPause)];
-    avPauseBtn.translatesAutoresizingMaskIntoConstraints = NO;
     self.avPauseBtn = avPauseBtn;
 
     [bar addSubview:urlField];
@@ -445,54 +519,32 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [lab.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
         [lab.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
         [lab.topAnchor constraintEqualToAnchor:bar.topAnchor constant:8],
+    ]];
 
-        /* 第2行：本地 / 相册 / 显示模式 / 画质 */
-        [startBtn.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
-        [startBtn.topAnchor constraintEqualToAnchor:lab.bottomAnchor constant:8],
-        [startBtn.heightAnchor constraintEqualToConstant:36],
+    /* 第2行：本地 / 相册 / 模式 / 画质 —— 按文字宽度，最多 4 */
+    [self layoutEqualWidthViews:@[startBtn, albumBtn, modeBtn, qualityDrop]
+                          inBar:bar
+                            top:lab.bottomAnchor
+                    topConstant:8];
 
-        [albumBtn.leadingAnchor constraintEqualToAnchor:startBtn.trailingAnchor constant:8],
-        [albumBtn.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
-        [albumBtn.heightAnchor constraintEqualToConstant:36],
+    /* 第3行：抗锯齿 / V / A / 同步暂停 —— 按文字宽度，最多 4 */
+    [self layoutEqualWidthViews:@[msaaDrop, videoPauseBtn, audioPauseBtn, avPauseBtn]
+                          inBar:bar
+                            top:startBtn.bottomAnchor
+                    topConstant:8];
 
-        [modeBtn.leadingAnchor constraintEqualToAnchor:albumBtn.trailingAnchor constant:8],
-        [modeBtn.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
-        [modeBtn.heightAnchor constraintEqualToConstant:36],
-
-        [qualityDrop.leadingAnchor constraintEqualToAnchor:modeBtn.trailingAnchor constant:8],
-        [qualityDrop.centerYAnchor constraintEqualToAnchor:startBtn.centerYAnchor],
-
-        /* 第3行：抗锯齿 + V/A/同步暂停 */
-        [msaaDrop.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
-        [msaaDrop.topAnchor constraintEqualToAnchor:startBtn.bottomAnchor constant:8],
-
-        [videoPauseBtn.leadingAnchor constraintEqualToAnchor:msaaDrop.trailingAnchor constant:8],
-        [videoPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
-        [videoPauseBtn.heightAnchor constraintEqualToConstant:36],
-        [videoPauseBtn.widthAnchor constraintEqualToConstant:64],
-
-        [audioPauseBtn.leadingAnchor constraintEqualToAnchor:videoPauseBtn.trailingAnchor constant:8],
-        [audioPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
-        [audioPauseBtn.heightAnchor constraintEqualToConstant:36],
-        [audioPauseBtn.widthAnchor constraintEqualToConstant:64],
-
-        [avPauseBtn.leadingAnchor constraintEqualToAnchor:audioPauseBtn.trailingAnchor constant:8],
-        [avPauseBtn.centerYAnchor constraintEqualToAnchor:msaaDrop.centerYAnchor],
-        [avPauseBtn.heightAnchor constraintEqualToConstant:36],
-        [avPauseBtn.widthAnchor constraintEqualToConstant:56],
-
-        /* 第4行：URL 独占 */
+    /* 第4行：URL + 播放 */
+    [NSLayoutConstraint activateConstraints:@[
         [urlField.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
         [urlField.topAnchor constraintEqualToAnchor:msaaDrop.bottomAnchor constant:8],
         [urlField.heightAnchor constraintEqualToConstant:36],
+        [urlField.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-10],
 
         [urlPlayBtn.leadingAnchor constraintEqualToAnchor:urlField.trailingAnchor constant:8],
         [urlPlayBtn.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-10],
         [urlPlayBtn.centerYAnchor constraintEqualToAnchor:urlField.centerYAnchor],
         [urlPlayBtn.heightAnchor constraintEqualToConstant:36],
         [urlPlayBtn.widthAnchor constraintEqualToConstant:88],
-
-        [urlField.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-10],
     ]];
 
     self.controlsVisible = YES;
@@ -542,17 +594,31 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 }
 
 -(void)pickAlbumVideo{
+    if (@available(iOS 14.0, *)) {
+        /* PHPicker：点选即回调，无 UIImagePicker 的「使用视频」二次确认/剪辑页 */
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.filter = [PHPickerFilter videosFilter];
+        config.selectionLimit = 1;
+        config.preferredAssetRepresentationMode = PHPickerConfigurationAssetRepresentationModeCurrent;
+        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+        picker.delegate = self;
+        picker.modalPresentationStyle = UIModalPresentationFullScreen;
+        [self presentViewController:picker animated:YES completion:nil];
+        return;
+    }
+    [self pickAlbumVideoWithImagePicker];
+}
+
+-(void)pickAlbumVideoWithImagePicker{
     if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypePhotoLibrary]) {
         self.lab.text = @"当前设备不支持相册";
         return;
     }
-
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
     picker.mediaTypes = @[(NSString *)kUTTypeMovie];
     picker.delegate = self;
     picker.allowsEditing = NO;
-    /* Passthrough：不重编码，导出/拷贝很快 */
     if (@available(iOS 11.0, *)) {
         picker.videoExportPreset = AVAssetExportPresetPassthrough;
     }
@@ -560,36 +626,102 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self presentViewController:picker animated:YES completion:nil];
 }
 
+/* 先清旧拷贝，再拷进 Documents/AlbumVideos 并播放 */
+-(void)importAndPlayAlbumVideoAtURL:(NSURL *)mediaURL {
+    if (!mediaURL) {
+        self.lab.text = @"未获取到视频文件";
+        return;
+    }
+    [self clearCopiedAlbumVideos];
+    NSString *ext = mediaURL.pathExtension.length ? mediaURL.pathExtension : @"MOV";
+    NSString *base = mediaURL.lastPathComponent.length
+        ? mediaURL.lastPathComponent.stringByDeletingPathExtension
+        : @"album";
+    NSString *unique = [NSString stringWithFormat:@"%@_%@.%@",
+                        base,
+                        @((long long)([[NSDate date] timeIntervalSince1970] * 1000)),
+                        ext];
+    NSString *localPath = [[self albumVideosDirectory] stringByAppendingPathComponent:unique];
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] copyItemAtURL:mediaURL
+                                                 toURL:[NSURL fileURLWithPath:localPath]
+                                                 error:&err]) {
+        self.lab.text = err.localizedDescription ?: @"拷贝相册视频失败";
+        return;
+    }
+    [self startPlayWithPath:localPath];
+}
+
+#pragma mark - PHPickerViewControllerDelegate
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)) {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) {
+        self.lab.text = @"已取消选择";
+        return;
+    }
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    NSString *typeId = @"public.movie";
+    if (![provider hasItemConformingToTypeIdentifier:typeId]) {
+        /* 部分视频只声明具体 UTI */
+        NSArray<NSString *> *fallbacks = @[
+            @"public.mpeg-4",
+            @"com.apple.quicktime-movie",
+            @"public.avi",
+        ];
+        typeId = nil;
+        for (NSString *t in fallbacks) {
+            if ([provider hasItemConformingToTypeIdentifier:t]) {
+                typeId = t;
+                break;
+            }
+        }
+    }
+    if (!typeId) {
+        self.lab.text = @"无法读取该视频";
+        return;
+    }
+    self.lab.text = @"正在导入相册视频…";
+    __weak typeof(self) weakSelf = self;
+    [provider loadFileRepresentationForTypeIdentifier:typeId
+                                     completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+        /* url 仅在本回调内有效，必须同步拷贝 */
+        NSString *tmpCopy = nil;
+        if (url && !error) {
+            NSString *ext = url.pathExtension.length ? url.pathExtension : @"MOV";
+            tmpCopy = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                       [NSString stringWithFormat:@"phpick_%@.%@", NSUUID.UUID.UUIDString, ext]];
+            [[NSFileManager defaultManager] removeItemAtPath:tmpCopy error:nil];
+            NSError *copyErr = nil;
+            if (![[NSFileManager defaultManager] copyItemAtURL:url
+                                                         toURL:[NSURL fileURLWithPath:tmpCopy]
+                                                         error:&copyErr]) {
+                tmpCopy = nil;
+                error = copyErr;
+            }
+        }
+        NSString *path = tmpCopy;
+        NSError *errOut = error;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (!path.length) {
+                strongSelf.lab.text = errOut.localizedDescription ?: @"导入相册视频失败";
+                return;
+            }
+            [strongSelf importAndPlayAlbumVideoAtURL:[NSURL fileURLWithPath:path]];
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        });
+    }];
+}
+
 #pragma mark - UIImagePickerControllerDelegate
 
 - (void)imagePickerController:(UIImagePickerController *)picker
 didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
     NSURL *mediaURL = info[UIImagePickerControllerMediaURL];
-
-    NSString *localPath = nil;
-    if (mediaURL) {
-        /* 回调里立刻拷进 App tmp（此时可读），再 dismiss 播放 */
-        NSString *ext = mediaURL.pathExtension.length ? mediaURL.pathExtension : @"MOV";
-        NSString *name = [NSString stringWithFormat:@"album_%@.%@",
-                          @((long long)([[NSDate date] timeIntervalSince1970] * 1000)), ext];
-        localPath = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
-        [[NSFileManager defaultManager] removeItemAtPath:localPath error:nil];
-        NSError *err = nil;
-        if (![[NSFileManager defaultManager] copyItemAtURL:mediaURL
-                                                     toURL:[NSURL fileURLWithPath:localPath]
-                                                     error:&err]) {
-            localPath = nil;
-            self.lab.text = err.localizedDescription ?: @"拷贝相册视频失败";
-        }
-    } else {
-        self.lab.text = @"未获取到视频文件";
-    }
-
-    NSString *pathToPlay = localPath;
     [picker dismissViewControllerAnimated:YES completion:^{
-        if (pathToPlay.length) {
-            [self startPlayWithPath:pathToPlay];
-        }
+        [self importAndPlayAlbumVideoAtURL:mediaURL];
     }];
 }
 

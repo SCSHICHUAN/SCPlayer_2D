@@ -54,15 +54,25 @@ static __weak SCDropdownButton *gOpenDropdown = nil;
 }
 
 - (void)refreshTitle {
-    NSString *opt = @"";
-    if (self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)self.options.count) {
-        opt = self.options[self.selectedIndex];
+    NSString *title;
+    if (self.fixedTriggerTitle.length > 0) {
+        title = [NSString stringWithFormat:@"%@ ▾", self.fixedTriggerTitle];
+    } else {
+        NSString *opt = @"";
+        if (self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)self.options.count) {
+            opt = self.options[self.selectedIndex];
+        }
+        title = self.titlePrefix.length
+            ? [NSString stringWithFormat:@"%@:%@ ▾", self.titlePrefix, opt]
+            : [NSString stringWithFormat:@"%@ ▾", opt];
     }
-    NSString *title = self.titlePrefix.length
-        ? [NSString stringWithFormat:@"%@:%@ ▾", self.titlePrefix, opt]
-        : [NSString stringWithFormat:@"%@ ▾", opt];
     [self.triggerButton setTitle:title forState:UIControlStateNormal];
     [self invalidateIntrinsicContentSize];
+}
+
+- (void)setFixedTriggerTitle:(NSString *)fixedTriggerTitle {
+    _fixedTriggerTitle = [fixedTriggerTitle copy];
+    [self refreshTitle];
 }
 
 - (CGSize)intrinsicContentSize {

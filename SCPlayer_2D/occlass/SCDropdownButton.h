@@ -15,6 +15,8 @@ typedef NS_ENUM(NSInteger, SCDropdownPanelAlignment) {
 @interface SCDropdownButton : UIView
 
 @property (nonatomic, copy) NSString *titlePrefix;
+/** 非空时触发按钮固定显示该文案（带 ▾），不随选中项变化 */
+@property (nonatomic, copy, nullable) NSString *fixedTriggerTitle;
 @property (nonatomic, copy) NSArray<NSString *> *options;
 @property (nonatomic, assign) NSInteger selectedIndex;
 @property (nonatomic, assign, getter=isEnabled) BOOL enabled;
