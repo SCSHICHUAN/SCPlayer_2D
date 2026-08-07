@@ -122,7 +122,8 @@ typedef struct SCPlayer{
     PacketQueue     audioq;          //音频的队列
     uint8_t         *audio_buf;      // 解码后到音频数据
     unsigned int    audio_buf_size;  // 当前软件缓冲字节数
-    unsigned int    audio_buf_cursor; // 软件缓冲已交给设备的字节数
+    unsigned int    audio_buf_cursor; // 本帧已交给 AudioQueue 的字节数
+    unsigned int    audio_aq_size;   // AudioQueue 中尚未播完的字节数（水位）
     AVFrame         audio_frame;     //音频的frame
     AVPacket        audio_pkt;       //音频包
     uint8_t         *audio_pkt_data; //音频原始数据

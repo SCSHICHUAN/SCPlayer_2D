@@ -606,6 +606,7 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             }
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
+            scp->audio_aq_size = 0;
             scp->audio_st = st;
             scp->audio_index = stream_index;
             scp->audio_ctx = avctx;

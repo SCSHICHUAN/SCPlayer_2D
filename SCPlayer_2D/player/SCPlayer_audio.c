@@ -112,9 +112,8 @@ static int audio_decode_frame(SCPlayer *scp)
                                                        scp->audio_frame.format,
                                                        1);
             }          
-            // audio_clock = 本帧结束时刻（ms）；当前播放点再扣未播完字节
+            // audio_clock = 本帧 pts 起点（ms）；播出时刻再靠 cursor / aq 水位修正
             if(!isnan(scp->audio_frame.pts)){
-                //audio_clock = 当前帧pts(起始点)
                 scp->audio_clock = sc_ts_to_ms(scp->audio_frame.pts, scp->audio_st->time_base);
             }else{
                 scp->audio_clock = NAN;
@@ -142,13 +141,27 @@ void audio_decode_callback(void *userdata, uint8_t *stream, int len)
     scp->out_audio_size = audio_decode_frame(scp);
 }
 
-/* 整帧已写入 AudioQueue：软件缓冲视为交出去，并累加硬件队列字节 */
+/* Enqueue 成功：本帧 cursor 前进，硬件水位上升（PCM 已由 AQ 持有，软件侧可被下一帧覆盖） */
 void audio_queue_wrote(SCPlayer *scp, int bytes)
 {
     if (!scp || bytes <= 0) {
         return;
     }
-    scp->audio_buf_cursor += bytes;//移动游标,已经被消费
+    scp->audio_buf_cursor += (unsigned int)bytes;
+    scp->audio_aq_size += (unsigned int)bytes;
+}
+
+/* 某 AQ buffer 播完回收：水位下降（不依赖仍存在的 PCM，只记字节账） */
+void audio_queue_consumed(SCPlayer *scp, int bytes)
+{
+    if (!scp || bytes <= 0) {
+        return;
+    }
+    if (scp->audio_aq_size >= (unsigned int)bytes) {
+        scp->audio_aq_size -= (unsigned int)bytes;
+    } else {
+        scp->audio_aq_size = 0;
+    }
 }
 
 //希望到音频目标参数
@@ -196,7 +209,10 @@ static int audio_bytes_per_sec(SCPlayer *scp)
     return scp->audio_ctx->sample_rate * scp->audio_ctx->ch_layout.nb_channels * 2;
 }
 
-/* 当前音频播放时刻（ms）= 最近一帧结束 pts + 已经消耗的 */
+/*
+ 当前播放时刻（ms）≈ 本帧起点 pts + 已交给设备的时长 − AQ 未播完时长
+ aq 水位不存 PCM，只记账：解码会覆盖 audio_buf，硬件延迟靠字节账
+ */
 double get_audio_clock(SCPlayer *scp){
     double pts;
     int bytes_per_sec;
@@ -210,7 +226,12 @@ double get_audio_clock(SCPlayer *scp){
     if (!bytes_per_sec) {
         return pts;
     }
-
-    pts += sc_sec_to_ms((double)scp->audio_buf_cursor / bytes_per_sec);    
+   
+    //包的开始时间 + 已经写入的设备数据的时间(写不代表已经播放)
+    pts += sc_sec_to_ms((double)scp->audio_buf_cursor / bytes_per_sec);
+    if (scp->audio_aq_size > 0) {
+        //设备真播放调的数据的时间
+        pts -= sc_sec_to_ms((double)scp->audio_aq_size / bytes_per_sec);
+    }
     return pts;
 }

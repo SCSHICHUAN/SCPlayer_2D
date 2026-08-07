@@ -49,21 +49,19 @@
  AudioQueue 和 SDL 不一样
  AudioQueue要数据
  你自己定，最多 mAudioDataBytesCapacity
- 上次消耗了多少mAudioDataByteSize
+ 进回调时 mAudioDataByteSize ≈ 上一盒写入、刚播完的长度
  */
 // AudioQueue回调：buffer 播完回收后再填下一帧
 void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
     if (!inUserData || !inBuffer) {
         return;
     }
-    
-    printf("音频需要的 %d \n",inBuffer->mAudioDataByteSize);
 
     SCAudioQueuePlayer *queuePlayer = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
     SCPlayer *scp = queuePlayer->scp;
-    
+
     if (!scp || scp->audioq.nb_packets <= 0) {
-        /* 尚无数据：填静音并重新入队，避免队列饿死 */
+        /* 尚无数据：填静音并重新入队，避免队列饿死（不计入 aq 水位） */
         memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataBytesCapacity);
         inBuffer->mAudioDataByteSize = inBuffer->mAudioDataBytesCapacity > 0
             ? (UInt32)FFMIN(BUFFER_SIZE, inBuffer->mAudioDataBytesCapacity)
@@ -73,8 +71,11 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
         }
         return;
     }
-    
-    //ffmpeg解码
+
+    /* 上一盒已播完：水位下降（PCM 可能早已被覆盖，只扣字节账） */
+    audio_queue_consumed(scp, (int)inBuffer->mAudioDataByteSize);
+
+    //ffmpeg解码 处理下一个包
     audio_decode_callback(scp,NULL,0);
     int buff_size = scp->out_audio_size;// 解码后的字节数
     if(!scp->audio_buf || buff_size <= 0) {
@@ -84,8 +85,8 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
         }
         return;
     }
-    
-    //这个只是一个保护, 前提是scplayer每次多没有填满,所以每次添入的都被消耗了
+
+    /* 保护：正常每帧 < capacity；截断仅防写越界 */
     if (buff_size > (int)inBuffer->mAudioDataBytesCapacity) {
         buff_size = (int)inBuffer->mAudioDataBytesCapacity;
     }
@@ -93,7 +94,8 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
     inBuffer->mAudioDataByteSize = (UInt32)buff_size;
     memcpy(inBuffer->mAudioData, scp->audio_buf, (UInt32)buff_size);
     AudioQueueEnqueueBuffer(queuePlayer->audioQueue, inBuffer, 0, NULL);
-    audio_queue_wrote(scp, buff_size);//增加硬件水位
+    /* 本盒已交给硬件：cursor + 水位上升 */
+    audio_queue_wrote(scp, buff_size);
 }
 
 

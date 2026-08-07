@@ -188,7 +188,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [self.view sendSubviewToBack:self.cRender];
     }
     [self.view bringSubviewToFront:self.controlsBar];
-
+    
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
