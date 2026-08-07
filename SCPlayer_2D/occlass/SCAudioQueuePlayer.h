@@ -13,7 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface SCAudioQueuePlayer : NSObject
 
-- (void)initializeAudioQueue:(VideoState *)is;
+- (void)initializeAudioQueue:(SCPlayer *)is;
 - (void)play;
 - (void)stop;
 - (void)pause ;

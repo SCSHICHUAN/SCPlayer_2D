@@ -42,7 +42,7 @@ __attribute__((used)) static const void *const sc_force_link_videotoolbox[] = {
  2.创建win 和renderer
  
  二.调用stream_open()函数
- 1.创建is结构体
+ 1.创建scp结构体
  2.创建video，audio，frame 队列
  3.创建线程“read_thread()”读包队列------线程2
  
@@ -57,11 +57,10 @@ __attribute__((used)) static const void *const sc_force_link_videotoolbox[] = {
  */
 
 
-
 /*
- 自定义pkt queue
+ ========================自定义pkt queue========================
  */
-// 初始化队列
+// 初始化pkt队列
 static int packet_queue_init(PacketQueue *q)
 {
     memset(q, 0, sizeof(PacketQueue));
@@ -83,7 +82,8 @@ static int packet_queue_init(PacketQueue *q)
     }
     return 0;
 }
-// 清空队列
+
+// 清空pkt队列
 static void packet_queue_flush(PacketQueue *q)
 {
     MyPacketEle mypkt;
@@ -99,7 +99,8 @@ static void packet_queue_flush(PacketQueue *q)
     
     pthread_mutex_unlock(&q->mutex);
 }
-// 销毁队列
+
+// 销毁pkt队列
 static void packet_queue_destroy(PacketQueue *q)
 {
     packet_queue_flush(q);
@@ -107,8 +108,6 @@ static void packet_queue_destroy(PacketQueue *q)
     pthread_mutex_destroy(&q->mutex);
     pthread_cond_destroy(&q->cond);
 }
-
-
 
 // put 私有的方法
 static int packet_queue_put_priv(PacketQueue *q, AVPacket *pkt)
@@ -199,6 +198,7 @@ static void packet_queue_abort(PacketQueue *q)
     pthread_cond_signal(&q->cond);
     pthread_mutex_unlock(&q->mutex);
 }
+
 
 
 
@@ -325,17 +325,17 @@ static enum AVPixelFormat sc_get_hw_format(AVCodecContext *ctx,
     const enum AVPixelFormat *p;
     enum AVPixelFormat hw_pix_fmt = AV_PIX_FMT_NONE;
     enum AVPixelFormat fallback = AV_PIX_FMT_NONE;
-    VideoState *is = ctx->opaque ? (VideoState *)ctx->opaque : NULL;
+    SCPlayer *scp = ctx->opaque ? (SCPlayer *)ctx->opaque : NULL;
     
-    if (is) {
-        hw_pix_fmt = is->hw_pix_fmt;
+    if (scp) {
+        hw_pix_fmt = scp->hw_pix_fmt;
     }
     
     for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
         if (hw_pix_fmt != AV_PIX_FMT_NONE && *p == hw_pix_fmt) {
-            if (is) {
-                is->hw_video = 1;
-                is->hw_fallback = 0;
+            if (scp) {
+                scp->hw_video = 1;
+                scp->hw_fallback = 0;
             }
             av_log(ctx, AV_LOG_INFO, "hw get_format: %s (HW confirmed)\n",
                    av_get_pix_fmt_name(*p));
@@ -351,10 +351,10 @@ static enum AVPixelFormat sc_get_hw_format(AVCodecContext *ctx,
     }
     
     /* VT 不在候选列表：说明刚 setup 失败，软格式续命不够，标记整路重开软解 */
-    if (is) {
-        is->hw_video = 0;
-        is->hw_pix_fmt = AV_PIX_FMT_NONE;
-        is->hw_fallback = 1;
+    if (scp) {
+        scp->hw_video = 0;
+        scp->hw_pix_fmt = AV_PIX_FMT_NONE;
+        scp->hw_fallback = 1;
     }
     ctx->get_format = NULL;
     av_buffer_unref(&ctx->hw_device_ctx);
@@ -419,19 +419,19 @@ static void sc_hw_decoder_uninit(AVCodecContext *avctx)
 }
 
 /* VT session 失败后：丢弃硬解上下文，全新软解 open（保留 opaque 以外的绑定由调用方换指针） */
-int sc_video_reopen_software(VideoState *is)
+int sc_video_reopen_software(SCPlayer *scp)
 {
     AVCodecContext *old_ctx;
     AVCodecContext *avctx = NULL;
     const AVCodec *codec;
     int ret;
     
-    if (!is || !is->video_st) {
+    if (!scp || !scp->video_st) {
         return AVERROR(EINVAL);
     }
     
-    old_ctx = is->video_ctx;
-    codec = avcodec_find_decoder(is->video_st->codecpar->codec_id);
+    old_ctx = scp->video_ctx;
+    codec = avcodec_find_decoder(scp->video_st->codecpar->codec_id);
     if (!codec) {
         return AVERROR_DECODER_NOT_FOUND;
     }
@@ -441,13 +441,13 @@ int sc_video_reopen_software(VideoState *is)
         return AVERROR(ENOMEM);
     }
     
-    ret = avcodec_parameters_to_context(avctx, is->video_st->codecpar);
+    ret = avcodec_parameters_to_context(avctx, scp->video_st->codecpar);
     if (ret < 0) {
         avcodec_free_context(&avctx);
         return ret;
     }
     
-    avctx->opaque = is;
+    avctx->opaque = scp;
     /* 纯软解，不再挂 get_format / hw_device_ctx */
     ret = avcodec_open2(avctx, codec, NULL);
     if (ret < 0) {
@@ -460,34 +460,34 @@ int sc_video_reopen_software(VideoState *is)
         avcodec_free_context(&old_ctx);
     }
     
-    is->video_ctx = avctx;
-    is->hw_video = 0;
-    is->hw_pix_fmt = AV_PIX_FMT_NONE;
-    is->hw_fallback = 0;
-    if (is->sws_ctx) {
-        sws_freeContext(is->sws_ctx);
-        is->sws_ctx = NULL;
+    scp->video_ctx = avctx;
+    scp->hw_video = 0;
+    scp->hw_pix_fmt = AV_PIX_FMT_NONE;
+    scp->hw_fallback = 0;
+    if (scp->sws_ctx) {
+        sws_freeContext(scp->sws_ctx);
+        scp->sws_ctx = NULL;
     }
     
     av_log(NULL, AV_LOG_INFO, "video decoder: software (reopened after VT failure)\n");
     return 0;
 }
 
-/* 读取流旋转元数据（度），对齐 ffplay：displaymatrix / rotate tag */
+/* 读取流旋转元数据（度），对齐 ffplay：dscpplaymatrix / rotate tag */
 static int sc_get_stream_rotation(AVStream *st)
 {
     double theta = 0;
     size_t size = 0;
-    uint8_t *displaymatrix = NULL;
+    uint8_t *dscpplaymatrix = NULL;
     AVDictionaryEntry *entry = NULL;
     int deg;
     
     if (!st) {
         return 0;
     }
-    displaymatrix = av_stream_get_side_data(st, AV_PKT_DATA_DISPLAYMATRIX, &size);
-    if (displaymatrix && size >= 9 * sizeof(int32_t)) {
-        theta = -av_display_rotation_get((const int32_t *)displaymatrix);
+    dscpplaymatrix = av_stream_get_side_data(st, AV_PKT_DATA_DISPLAYMATRIX, &size);
+    if (dscpplaymatrix && size >= 9 * sizeof(int32_t)) {
+        theta = -av_display_rotation_get((const int32_t *)dscpplaymatrix);
     } else {
         entry = av_dict_get(st->metadata, "rotate", NULL, 0);
         if (entry && entry->value && entry->value[0]) {
@@ -499,11 +499,11 @@ static int sc_get_stream_rotation(AVStream *st)
     return deg;
 }
 
-int stream_component_open(VideoState *is,int stream_index){
+int stream_component_open(SCPlayer *scp,int stream_index){
     
     int ret =-1;
     
-    AVFormatContext *ic = is->ic;
+    AVFormatContext *ic = scp->ic;
     AVCodecContext *avctx = NULL;
     const AVCodec *codec = NULL;
     
@@ -544,18 +544,18 @@ int stream_component_open(VideoState *is,int stream_index){
     
     /* 视频：优先 VideoToolbox 硬解；真正 HW 要等 get_format 确认 */
     if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-        is->hw_video = 0;
-        is->hw_pix_fmt = AV_PIX_FMT_NONE;
-        is->hw_fallback = 0;
-        avctx->opaque = is;
+        scp->hw_video = 0;
+        scp->hw_pix_fmt = AV_PIX_FMT_NONE;
+        scp->hw_fallback = 0;
+        avctx->opaque = scp;
         
-        if (sc_hw_decoder_init(avctx, codec, &is->hw_pix_fmt) == 0) {
+        if (sc_hw_decoder_init(avctx, codec, &scp->hw_pix_fmt) == 0) {
             ret = avcodec_open2(avctx, codec, NULL);
             if (ret < 0) {
                 av_log(avctx, AV_LOG_WARNING,
                        "硬解 open 失败 (%s)，回退软解\n", av_err2str(ret));
                 sc_hw_decoder_uninit(avctx);
-                is->hw_pix_fmt = AV_PIX_FMT_NONE;
+                scp->hw_pix_fmt = AV_PIX_FMT_NONE;
                 ret = avcodec_open2(avctx, codec, NULL);
             } else if (avctx->hw_device_ctx != NULL) {
                 /* 此时往往尚未 get_format；模拟器常在首帧才暴露 VT 失败 */
@@ -565,11 +565,11 @@ int stream_component_open(VideoState *is,int stream_index){
                 av_log(NULL, AV_LOG_WARNING,
                        "open ok but hw_device_ctx cleared, soft\n");
                 sc_hw_decoder_uninit(avctx);
-                is->hw_pix_fmt = AV_PIX_FMT_NONE;
+                scp->hw_pix_fmt = AV_PIX_FMT_NONE;
             }
         } else {
             sc_hw_decoder_uninit(avctx);
-            is->hw_pix_fmt = AV_PIX_FMT_NONE;
+            scp->hw_pix_fmt = AV_PIX_FMT_NONE;
             ret = avcodec_open2(avctx, codec, NULL);
         }
         
@@ -577,7 +577,7 @@ int stream_component_open(VideoState *is,int stream_index){
             av_log(avctx, AV_LOG_ERROR, "打开视频解码器失败: %s \n", av_err2str(ret));
             goto __ERROR;
         }
-        if (!is->hw_video && !avctx->hw_device_ctx) {
+        if (!scp->hw_video && !avctx->hw_device_ctx) {
             av_log(NULL, AV_LOG_INFO, "video decoder: software\n");
         }
     } else {
@@ -591,48 +591,50 @@ int stream_component_open(VideoState *is,int stream_index){
     
     switch (avctx->codec_type){
         case AVMEDIA_TYPE_AUDIO:
+            /*
+             scp音频结构体赋值
+             */
             sample_rate = avctx->sample_rate;
             ret = av_channel_layout_copy(&ch_layout,&avctx->ch_layout);//拷贝音频设备参数
             if(ret < 0){
                 goto __ERROR;
             }
-            ret = audio_open(is,&ch_layout,sample_rate);
+            ret = audio_wanted_spec(scp,&ch_layout,sample_rate);
             if(ret < 0){
                 av_log(NULL,AV_LOG_ERROR,"不能打开音频设备!\n");
                 // goto __ERROR;
             }
+            scp->audio_buf_size = 0;
+            scp->audio_buf_cursor = 0;
+            scp->audio_st = st;
+            scp->audio_index = stream_index;
+            scp->audio_ctx = avctx;
             
-            is->audio_buf_size = 0;
-            is->audio_buf_index = 0;
-            is->audio_aq_size = 0;
-            is->audio_st = st;
-            is->audio_index = stream_index;
-            is->audio_ctx = avctx;
-            
-            //开始播放音频
-            //         SDL_PauseAudio(0);
-            is->fn_call(NULL,0,is,is->userData);
+            //打开音频设备开始播放  SDL_PauseAudio(0);
+            scp->player_call_other(NULL,0,scp,scp->userData);
             break;
         case AVMEDIA_TYPE_VIDEO:
-            is->video_index = stream_index;
-            is->video_st = st;
-            is->video_ctx = avctx;
-            
-            is->frame_timer = sc_gettime_ms();//第一帧视频播放的墙钟时刻（ms）
+            /*
+             scp视频结构体赋值
+             */
+            scp->video_index = stream_index;
+            scp->video_st = st;
+            scp->video_ctx = avctx;
+            scp->frame_timer = av_gettime_ms();//第一帧视频播放的墙钟时刻（ms）
             /* 帧间隔由流 fps 计算；拿不到则 SC_DEFAULT_FRAME_DURATION_MS(40ms≈25fps) */
-            is->frame_duration = sc_frame_duration_from_stream(is->ic, st);
-            is->frame_last_delay = is->frame_duration;
-            is->display_busy = 0;
-            is->video_rotate = sc_get_stream_rotation(st);
-            is->video_current_pts_time = sc_gettime_ms();//记下 pts 时的墙钟（ms）
+            scp->frame_duration = sc_frame_duration_from_stream(scp->ic, st);
+            scp->frame_last_delay = scp->frame_duration;
+            scp->display_busy = 0;
+            scp->video_rotate = sc_get_stream_rotation(st);
+            scp->video_current_pts_time = av_gettime_ms();//记下 pts 时的墙钟（ms）
             av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms rotate=%d\n",
-                   is->frame_duration, is->video_rotate);
+                   scp->frame_duration, scp->video_rotate);
             
-            if(pthread_create(&is->decode_tid, NULL, video_decode_thread, is) != 0){
+            if(pthread_create(&scp->decode_tid, NULL, video_decode_thread, scp) != 0){
                 av_log(NULL,AV_LOG_FATAL,"pthread_create(video_decode_thread)\n");
                 goto __ERROR;
             }
-            is->has_decode_tid = 1;
+            scp->has_decode_tid = 1;
             break;
         case AVMEDIA_TYPE_UNKNOWN:
             av_log(avctx,AV_LOG_ERROR,"Other media type unknow - media_type = %d\n",avctx->codec_type);
@@ -660,7 +662,7 @@ void *read_thread(void *arg){
     int video_index  = -1;
     int audio_index  = -1;
     
-    VideoState *is = (VideoState*)arg;
+    SCPlayer *scp = (SCPlayer*)arg;
     AVFormatContext *ic = NULL;
     AVPacket *pkt = NULL;
     
@@ -671,11 +673,11 @@ void *read_thread(void *arg){
     }
     
     //1. Open media file
-    if((ret = avformat_open_input(&ic, is->filename, NULL, NULL)) < 0) {
-        av_log(NULL, AV_LOG_ERROR, "Could not open file: %s, %d(%s)\n", is->filename, ret, av_err2str(ret));
+    if((ret = avformat_open_input(&ic, scp->filename, NULL, NULL)) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Could not open file: %s, %d(%s)\n", scp->filename, ret, av_err2str(ret));
         goto __ERROR; // Couldn't open file
     }
-    is->ic = ic;
+    scp->ic = ic;
     
     //2. extract media info
     if(avformat_find_stream_info(ic, NULL) < 0) {
@@ -706,36 +708,35 @@ void *read_thread(void *arg){
     
     //音视频编解码器初始化
     if(audio_index >= 0){
-        stream_component_open(is,audio_index);
+        stream_component_open(scp,audio_index);
     }
     if(video_index >= 0 ){
-        
         //打开视频流
-        stream_component_open(is, video_index);
+        stream_component_open(scp, video_index);
     }
     
     //读取多媒体包保存在pkt queue中
     for(;;){
         
-        if(is->quit){
+        if(scp->quit){
             ret = -1;
             goto __ERROR;
         }
         
         //没有消费完循环等待10ms，queue满了
-        //        if(is->audioq.size > MAX_QUEUE_SIZE ||
-        //           is->videoq.size > MAX_QUEUE_SIZE){
-        //            sc_delay_ms(10);
-        //            continue;
-        //           }
-        //              if(is->videoq.size > MAX_QUEUE_SIZE){
-        //                  sc_delay_ms(10);
-        //                  continue;
-        //                 }
+        if(scp->audioq.size > MAX_QUEUE_SIZE ||
+           scp->videoq.size > MAX_QUEUE_SIZE){
+            sc_delay_ms(10);
+            continue;
+        }
+        if(scp->videoq.size > MAX_QUEUE_SIZE){
+            sc_delay_ms(10);
+            continue;
+        }
         //从上下文中读取包
-        ret = av_read_frame(is->ic,pkt);
+        ret = av_read_frame(scp->ic,pkt);
         if(ret < 0){
-            if(is->ic->pb->error == 0){//no error; wait for user input
+            if(scp->ic->pb->error == 0){//no error; wait for user input
                 /*
                  如果还没有读取到包，等100毫秒在读
                  */
@@ -747,17 +748,17 @@ void *read_thread(void *arg){
         }
         
         //pkt 保存到 pkt queue中
-        if(pkt->stream_index == is->video_index){
-            packet_queue_put(&is->videoq,pkt); //视频包保存到视频队列
-        }else if(pkt->stream_index == is->audio_index){
-            packet_queue_put(&is->audioq,pkt); //音频包保存到音频队列
+        if(pkt->stream_index == scp->video_index){
+            packet_queue_put(&scp->videoq,pkt); //视频包保存到视频队列
+        }else if(pkt->stream_index == scp->audio_index){
+            packet_queue_put(&scp->audioq,pkt); //音频包保存到音频队列
         }else{
             av_packet_unref(pkt);              //取他类型的包丢弃
         }
     }
     
     /* all done - wait for it 如果读取完了 等待100ms*/
-    while (!is->quit){
+    while (!scp->quit){
         sc_delay_ms(100);
     }
     
@@ -771,8 +772,8 @@ __ERROR:
     return (void *)(intptr_t)ret;
 }
 
-static void stream_component_close(VideoState *is, int stream_index){
-    AVFormatContext *ic = is->ic;
+static void stream_component_close(SCPlayer *scp, int stream_index){
+    AVFormatContext *ic = scp->ic;
     AVCodecParameters *codecpar;
     
     if (stream_index < 0 || stream_index >= ic->nb_streams)
@@ -782,137 +783,137 @@ static void stream_component_close(VideoState *is, int stream_index){
     switch (codecpar->codec_type) {
         case AVMEDIA_TYPE_AUDIO:
             //      SDL_CloseAudio();
-            swr_free(&is->audio_swr_ctx);
-            av_freep(&is->audio_buf);
-            is->audio_buf = NULL;
+            swr_free(&scp->audio_swr_ctx);
+            av_freep(&scp->audio_buf);
+            scp->audio_buf = NULL;
             
             break;
         case AVMEDIA_TYPE_VIDEO:
-            frame_queue_abort(&is->pictq);
-            frame_queue_signal(&is->pictq); //可以确保所有等待的线程都被唤醒
-            if(is->has_decode_tid){
-                pthread_join(is->decode_tid, NULL);
-                is->has_decode_tid = 0;
+            frame_queue_abort(&scp->pictq);
+            frame_queue_signal(&scp->pictq); //可以确保所有等待的线程都被唤醒
+            if(scp->has_decode_tid){
+                pthread_join(scp->decode_tid, NULL);
+                scp->has_decode_tid = 0;
             }
-            if (is->sws_ctx) {
-                sws_freeContext(is->sws_ctx);
-                is->sws_ctx = NULL;
+            if (scp->sws_ctx) {
+                sws_freeContext(scp->sws_ctx);
+                scp->sws_ctx = NULL;
             }
-            is->hw_video = 0;
+            scp->hw_video = 0;
             break;
         default:
             break;
     }
 }
 
-static void stream_close(VideoState *is){
-    if(is->has_read_tid){
-        pthread_join(is->read_tid, NULL);
-        is->has_read_tid = 0;
+static void stream_close(SCPlayer *scp){
+    if(scp->has_read_tid){
+        pthread_join(scp->read_tid, NULL);
+        scp->has_read_tid = 0;
     }
     
     /* close each stream */
-    if (is->audio_index >= 0)
-        stream_component_close(is, is->audio_index);
-    if (is->video_index >= 0)
-        stream_component_close(is, is->video_index);
+    if (scp->audio_index >= 0)
+        stream_component_close(scp, scp->audio_index);
+    if (scp->video_index >= 0)
+        stream_component_close(scp, scp->video_index);
     
-    avformat_close_input(&is->ic);
-    packet_queue_destroy(&is->videoq);
-    packet_queue_destroy(&is->audioq);
-    frame_queue_destory(&is->pictq);
-    av_free(is->filename);
-    av_free(is);
+    avformat_close_input(&scp->ic);
+    packet_queue_destroy(&scp->videoq);
+    packet_queue_destroy(&scp->audioq);
+    frame_queue_destory(&scp->pictq);
+    av_free(scp->filename);
+    av_free(scp);
 }
 
-static VideoState *stream_open(const char* filename){
+static SCPlayer *stream_open(const char* filename){
     
-    VideoState *is;
-    is = av_mallocz(sizeof(VideoState));
-    if(!is){
+    SCPlayer *scp;
+    scp = av_mallocz(sizeof(SCPlayer));
+    if(!scp){
         av_log(NULL,AV_LOG_FATAL,"内存不足！\n");
         return NULL;
     }
     
-    is->audio_index = is->video_index =-1;
-    is->filename = av_strdup(filename);//源字符串的内容复制到新分配的内存区域，并返回指向该区域的指针
-    if(!is->filename){
+    scp->audio_index = scp->video_index =-1;
+    scp->filename = av_strdup(filename);//源字符串的内容复制到新分配的内存区域，并返回指向该区域的指针
+    if(!scp->filename){
         goto __ERROR;
     }
     
-    is->ytop = 0;
-    is->xleft = 0;
+    scp->ytop = 0;
+    scp->xleft = 0;
     
     //初始化packet queue
-    if(packet_queue_init(&is->videoq) < 0 || packet_queue_init(&is->audioq) < 0){
+    if(packet_queue_init(&scp->videoq) < 0 || packet_queue_init(&scp->audioq) < 0){
         goto __ERROR;
     }
     /*
      初始化video frame queue 用于保存解码后的视频帧，
      ffplay中同时有音频的帧的queue这里为了简单,没有音频的
      */
-    if(frame_queue_init(&is->pictq) < 0){
+    if(frame_queue_init(&scp->pictq) < 0){
         goto __ERROR;
     }
     
-    is->av_sync_type = av_sync_type;
-    if(pthread_create(&is->read_tid, NULL, read_thread, is) != 0){
+    scp->av_sync_type = av_sync_type;
+    if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
         av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
         goto __ERROR;
     }
-    is->has_read_tid = 1;
+    scp->has_read_tid = 1;
     
-    return is;
+    return scp;
 __ERROR:
-    stream_close(is);
+    stream_close(scp);
     return NULL;
 }
 //系统时间 / 外部时钟（ms）
 double get_external_clock(void){
-    return sc_gettime_ms();
+    return av_gettime_ms();
 }
 
 //当前音频播放的时刻
-double get_maste_clock(VideoState *is){
-    if(is->av_sync_type == AV_SYNC_AUDIO_MASTER){
-        return get_audio_clock(is);
-    } else if(is->av_sync_type == AV_SYNC_VIDEO_MASTER){
-        return get_video_clock(is);
+double get_maste_clock(SCPlayer *scp){
+    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+        return get_audio_clock(scp);
+    } else if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
+        return get_video_clock(scp);
     } else {
         return get_external_clock();
     }
 }
 
-static void do_exit(VideoState *is){
-    if(is){
-        stream_close(is);
+static void do_exit(SCPlayer *scp){
+    if(scp){
+        stream_close(scp);
     }
     av_log(NULL,AV_LOG_QUIET,"%s","");
 }
 
 
-static void video_refresh_loop(VideoState *is){
+static void video_refresh_loop(SCPlayer *scp){
     for(;;){
-        if(is->vidoe_stop == 1){
+        if(scp->vidoe_stop == 1){
             /* 视频暂停、音频继续：勿空转占满 CPU */
             sc_delay_ms(10);
             continue;
         }
-        if (is->quit) {
+        if (scp->quit) {
             break;
         }
-        video_refresh_timer(is);
-        if (is->quit) {
+        video_refresh_timer(scp);
+        if (scp->quit) {
             break;
         }
-        sc_delay_ms(is->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
+        sc_delay_ms(scp->delay_video_time);// 控制刷新节奏（同步仍靠 pts vs 音频时钟）
     }
 }
 
 
 void *video_loop(void *arg){
-    VideoState *is = (VideoState*)arg;
-    video_refresh_loop(is);
+    SCPlayer *scp = (SCPlayer*)arg;
+    video_refresh_loop(scp);
     return NULL;
 }
 
@@ -934,9 +935,9 @@ void *video_loop(void *arg){
  13. 收尾，释放资源
  */
 
-int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
+int scplayer(const char *filename, Player_call_other player_call_other, void *userData){
     
-    VideoState *is;
+    SCPlayer *scp;
     static int network_inited = 0;
     
     av_log_set_level(AV_LOG_INFO);
@@ -946,48 +947,48 @@ int scplayer(const char *filename, frame_call_bacl fn_call, void *userData){
     }
     
     if(!filename || !filename[0]){
-        av_log(NULL,AV_LOG_FATAL,"filename is empty\n");
+        av_log(NULL,AV_LOG_FATAL,"filename scp empty\n");
         return -1;
     }
     
-    is = stream_open(filename);
-    if(!is){
-        av_log(NULL,AV_LOG_FATAL,"初始化VideoState失败\n");
+    scp = stream_open(filename);
+    if(!scp){
+        av_log(NULL,AV_LOG_FATAL,"初始化SCPlayer失败\n");
         do_exit(NULL);
         return -1;
     }
-    is->fn_call = fn_call;
-    is->userData = userData;
+    scp->player_call_other = player_call_other;
+    scp->userData = userData;
     
     
-    if(pthread_create(&is->video_loop_tid, NULL, video_loop, is) == 0){
-        is->vidoe_stop = 0;
-        is->has_video_loop_tid = 1;
+    if(pthread_create(&scp->video_loop_tid, NULL, video_loop, scp) == 0){
+        scp->vidoe_stop = 0;
+        scp->has_video_loop_tid = 1;
     } else {
         av_log(NULL,AV_LOG_FATAL,"pthread_create(video_loop)\n");
-        do_exit(is);
+        do_exit(scp);
         return -1;
     }
     
     return 0;
 }
 
-void scplayer_stop(VideoState *is)
+void scplayer_stop(SCPlayer *scp)
 {
-    if (!is) {
+    if (!scp) {
         return;
     }
-    is->quit = 1;
-    packet_queue_abort(&is->videoq);
-    packet_queue_abort(&is->audioq);
-    frame_queue_abort(&is->pictq);
-    frame_queue_signal(&is->pictq);
+    scp->quit = 1;
+    packet_queue_abort(&scp->videoq);
+    packet_queue_abort(&scp->audioq);
+    frame_queue_abort(&scp->pictq);
+    frame_queue_signal(&scp->pictq);
     
-    if (is->has_video_loop_tid) {
-        pthread_join(is->video_loop_tid, NULL);
-        is->has_video_loop_tid = 0;
+    if (scp->has_video_loop_tid) {
+        pthread_join(scp->video_loop_tid, NULL);
+        scp->has_video_loop_tid = 0;
     }
-    stream_close(is);
+    stream_close(scp);
 }
 /*
  

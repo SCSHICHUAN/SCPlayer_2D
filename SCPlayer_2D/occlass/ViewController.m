@@ -44,7 +44,7 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @property(nonatomic,assign)BOOL audioPaused;
 @property(nonatomic,strong)UIView *controlsBar;
 @property(nonatomic,assign)BOOL controlsVisible;
-@property(nonatomic,assign)VideoState *playingIs;
+@property(nonatomic,assign)SCPlayer *playingIs;
 -(void)initAudio:(void *)opaque;
 -(void)startPlayWithPath:(NSString *)path;
 -(void)playURLFromField;
@@ -85,29 +85,29 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         });
     }else if(flag == 1){
         /* 模块已占 display_busy；接入方只负责：释放拷贝 + 清 busy */
-        VideoState *is = (VideoState *)opaque;
+        SCPlayer *scp = (SCPlayer *)opaque;
         if (!frame) {
-            if (is) {
-                is->display_busy = 0;
+            if (scp) {
+                scp->display_busy = 0;
             }
             return 0;
         }
-        if (!is || is->quit) {
+        if (!scp || scp->quit) {
             av_frame_free(&frame);
-            if (is) {
-                is->display_busy = 0;
+            if (scp) {
+                scp->display_busy = 0;
             }
             return 0;
         }
-        vc.playingIs = is;
-        vc.cRender.rotateDegrees = is->video_rotate;
+        vc.playingIs = scp;
+        vc.cRender.rotateDegrees = scp->video_rotate;
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
             AVFrame *owned = frame;
             av_frame_free(&owned);
-            /* 已切走片源则不要再写已释放的 VideoState */
-            if (vc.playingIs == is) {
-                is->display_busy = 0;
+            /* 已切走片源则不要再写已释放的 SCPlayer */
+            if (vc.playingIs == scp) {
+                scp->display_busy = 0;
             }
         }];
     }
@@ -118,21 +118,21 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
 
 -(void)initAudio:(void *)opaque{
-    VideoState *is = (VideoState *)opaque;
-    if (!is) {
+    SCPlayer *scp = (SCPlayer *)opaque;
+    if (!scp) {
         return;
     }
     /* 不可用局部变量：initialize 后 AudioQueue 仍回调 self，局部对象会被 ARC 释放导致野指针崩溃 */
     [self.audioPlayer stop];
     self.audioPlayer = [[SCAudioQueuePlayer alloc] init];
-    [self.audioPlayer initializeAudioQueue:is];
+    [self.audioPlayer initializeAudioQueue:scp]; //初始化音频设备
     [self.audioPlayer play];
     self.audioPaused = NO;
     [self updateAllPauseButtonTitles];
 }
 
 -(void)stopCurrentPlayback{
-    VideoState *is = self.playingIs;
+    SCPlayer *scp = self.playingIs;
     self.playingIs = NULL;
     self.audioPaused = NO;
     [self.audioPlayer stop];
@@ -140,9 +140,9 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.cRender.rotateDegrees = 0;
     [self.cRender clearDisplay];
     [self updateAllPauseButtonTitles];
-    if (is) {
-        is->display_busy = 0;
-        scplayer_stop(is);
+    if (scp) {
+        scp->display_busy = 0;
+        scplayer_stop(scp);
     }
 }
 
@@ -235,19 +235,19 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 }
 
 -(void)toggleVideoPause{
-    VideoState *is = self.playingIs;
-    if (!is) {
+    SCPlayer *scp = self.playingIs;
+    if (!scp) {
         self.lab.text = @"当前没有在播的视频";
         return;
     }
     /* 1=视频暂停（音频继续），0=视频播放 */
-    is->vidoe_stop = is->vidoe_stop ? 0 : 1;
+    scp->vidoe_stop = scp->vidoe_stop ? 0 : 1;
     [self updateAllPauseButtonTitles];
 }
 
 -(void)updateVideoPauseButtonTitle{
-    VideoState *is = self.playingIs;
-    BOOL paused = (is && is->vidoe_stop == 1);
+    SCPlayer *scp = self.playingIs;
+    BOOL paused = (scp && scp->vidoe_stop == 1);
     [self.videoPauseBtn setTitle:(paused ? @"V播放" : @"V暂停") forState:UIControlStateNormal];
 }
 
@@ -272,22 +272,22 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 }
 
 -(void)toggleAVPause{
-    VideoState *is = self.playingIs;
-    if (!is) {
+    SCPlayer *scp = self.playingIs;
+    if (!scp) {
         self.lab.text = @"当前没有在播的内容";
         return;
     }
-    BOOL paused = (is->vidoe_stop == 1) && self.audioPaused;
+    BOOL paused = (scp->vidoe_stop == 1) && self.audioPaused;
     if (paused) {
         /* 同步恢复音视频 */
-        is->vidoe_stop = 0;
+        scp->vidoe_stop = 0;
         if (self.audioPlayer) {
             [self.audioPlayer resume];
         }
         self.audioPaused = NO;
     } else {
         /* 同步暂停音视频 */
-        is->vidoe_stop = 1;
+        scp->vidoe_stop = 1;
         if (self.audioPlayer) {
             [self.audioPlayer pause];
         }
@@ -297,8 +297,8 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 }
 
 -(void)updateAVPauseButtonTitle{
-    VideoState *is = self.playingIs;
-    BOOL paused = (is && is->vidoe_stop == 1 && self.audioPaused);
+    SCPlayer *scp = self.playingIs;
+    BOOL paused = (scp && scp->vidoe_stop == 1 && self.audioPaused);
     [self.avPauseBtn setTitle:(paused ? @"播放" : @"暂停") forState:UIControlStateNormal];
 }
 

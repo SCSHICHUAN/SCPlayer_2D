@@ -11,17 +11,17 @@
 #include <libavutil/hwcontext.h>
 
 //推算pts 因为有时会没有pts
-static double synchronize_video(VideoState *is,AVFrame *sec_frame,double pts){
+static double synchronize_video(SCPlayer *scp,AVFrame *sec_frame,double pts){
     double frame_delay;
     
     if(pts != 0){
-        is->video_clock = pts;
+        scp->video_clock = pts;
     } else {
         //如果这一帧没有pts，说明这一帧播放的时间不确定，把之前保存的video_clock给pts
-        pts = is->video_clock;
+        pts = scp->video_clock;
     }
     /* time_base 单位为秒，产出转为 ms */
-    frame_delay = sc_sec_to_ms(av_q2d(is->video_ctx->time_base));
+    frame_delay = sc_sec_to_ms(av_q2d(scp->video_ctx->time_base));
     /* if we are repeating a frame, adjust clock accordingly
      重复帧用于平滑视频播放，并调整帧率
      重复帧（repeat_pict）是一个表示当前帧需要重复显示的次数的值，一般为0不重复
@@ -30,14 +30,14 @@ static double synchronize_video(VideoState *is,AVFrame *sec_frame,double pts){
      */
     frame_delay += sec_frame->repeat_pict * (frame_delay * 0.5);
     
-    is->video_clock += frame_delay;
+    scp->video_clock += frame_delay;
     return pts;
 }
 //保存到帧队列中
-static int queue_pitcure(VideoState *is,AVFrame *src_frame,
+static int queue_pitcure(SCPlayer *scp,AVFrame *src_frame,
                          double pts,double duration,int64_t pos){
     Frame *vp;
-    if(!(vp = frame_queue_peek_writable(&is->pictq)))
+    if(!(vp = frame_queue_peek_writable(&scp->pictq)))
         return -1;
     
     vp->sar = src_frame->sample_aspect_ratio;//SAR 表示单个像素的宽高比 SAR 为 1:1，则为方形像素
@@ -57,7 +57,7 @@ static int queue_pitcure(VideoState *is,AVFrame *src_frame,
      这在处理视频和音频帧时非常有用，因为它可以有效地管理和转移帧数据，而无需进行数据的深度复制。
      */
     av_frame_move_ref(vp->frame,src_frame);//保持视频帧数据
-    frame_queue_push(&is->pictq);
+    frame_queue_push(&scp->pictq);
     return 0;
 }
 
@@ -70,14 +70,14 @@ void *video_decode_thread(void *arg){
     double pts;
     double duration;
     
-    VideoState *is = (VideoState *)arg;
+    SCPlayer *scp = (SCPlayer *)arg;
     AVFrame *video_frame = NULL;   /* 解码器输出（可能是 VT 硬解帧） */
     AVFrame *sw_frame = NULL;      /* 硬解 transfer / 软帧暂存 */
     AVFrame *yuv_frame = NULL;     /* 统一成 YUV420P 给现有 OpenGL 渲染 */
     AVFrame *frame_for_queue = NULL;
     
-    AVRational tb = is->video_st->time_base;
-    AVRational frame_rate = av_guess_frame_rate(is->ic,is->video_st,NULL);//猜测视频流或帧的帧率（Frame Rate）
+    AVRational tb = scp->video_st->time_base;
+    AVRational frame_rate = av_guess_frame_rate(scp->ic,scp->video_st,NULL);//猜测视频流或帧的帧率（Frame Rate）
     
     video_frame = av_frame_alloc();
     sw_frame = av_frame_alloc();
@@ -88,60 +88,60 @@ void *video_decode_thread(void *arg){
     }
     
     for(;;){
-        if(is->quit){
+        if(scp->quit){
             break;
         }
         //以非阻塞的方式从队列中获取包，如果没有就直接返回，并且等待10ms在取,直到读取取
-        ret = packet_queue_get(&is->videoq,&is->video_pkt,0);
+        ret = packet_queue_get(&scp->videoq,&scp->video_pkt,0);
         if(ret <= 0){
-            av_log(is->video_ctx,AV_LOG_DEBUG,"video delay 10 ms\n");
+            av_log(scp->video_ctx,AV_LOG_DEBUG,"video delay 10 ms\n");
             sc_delay_ms(10);
             continue;
         }
         //发送视频包给解码器
-        ret = avcodec_send_packet(is->video_ctx,&is->video_pkt);
+        ret = avcodec_send_packet(scp->video_ctx,&scp->video_pkt);
         if(ret < 0){
-            av_log(is->video_ctx,AV_LOG_DEBUG,"发送视频包给解码器失败！\n");
+            av_log(scp->video_ctx,AV_LOG_DEBUG,"发送视频包给解码器失败！\n");
             goto __ERROR;
         }
         
         //轮询解码结果
         while(ret >= 0){
-            ret = avcodec_receive_frame(is->video_ctx,video_frame);
+            ret = avcodec_receive_frame(scp->video_ctx,video_frame);
             if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF){
                 break;//已经度到文件尾
             } else if ( ret < 0){
                 /* 模拟器上 VT 常在首帧 setup 失败，解码器状态已坏，整路重开软解并重送当前包 */
-                if (is->hw_fallback || is->video_ctx->hw_device_ctx) {
-                    av_log(is->video_ctx, AV_LOG_WARNING,
+                if (scp->hw_fallback || scp->video_ctx->hw_device_ctx) {
+                    av_log(scp->video_ctx, AV_LOG_WARNING,
                            "VT decode failed (%s), reopen software and retry packet\n",
                            av_err2str(ret));
-                    if (sc_video_reopen_software(is) == 0) {
-                        ret = avcodec_send_packet(is->video_ctx, &is->video_pkt);
+                    if (sc_video_reopen_software(scp) == 0) {
+                        ret = avcodec_send_packet(scp->video_ctx, &scp->video_pkt);
                         if (ret >= 0) {
                             continue;
                         }
                     }
                 }
-                av_log(is->video_ctx,AV_LOG_ERROR,"从解码器接受视频帧失败！\n");
+                av_log(scp->video_ctx,AV_LOG_ERROR,"从解码器接受视频帧失败！\n");
                 ret = -1;
                 goto __ERROR;
             }
 
-            if (is->hw_fallback) {
+            if (scp->hw_fallback) {
                 /* get_format 已回退但当前包可能已损坏，重开后再解 */
                 av_frame_unref(video_frame);
-                if (sc_video_reopen_software(is) == 0) {
-                    ret = avcodec_send_packet(is->video_ctx, &is->video_pkt);
+                if (sc_video_reopen_software(scp) == 0) {
+                    ret = avcodec_send_packet(scp->video_ctx, &scp->video_pkt);
                     if (ret >= 0) {
                         continue;
                     }
                 }
-                is->hw_fallback = 0;
+                scp->hw_fallback = 0;
             }
 
             if (video_frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
-                is->hw_video = 1;
+                scp->hw_video = 1;
             }
 
             frame_for_queue = video_frame;
@@ -150,7 +150,7 @@ void *video_decode_thread(void *arg){
                 av_frame_unref(sw_frame);
                 ret = av_hwframe_transfer_data(sw_frame, video_frame, 0);
                 if (ret < 0) {
-                    av_log(is->video_ctx, AV_LOG_ERROR,
+                    av_log(scp->video_ctx, AV_LOG_ERROR,
                            "av_hwframe_transfer_data failed: %s\n", av_err2str(ret));
                     av_frame_unref(video_frame);
                     continue;
@@ -163,13 +163,13 @@ void *video_decode_thread(void *arg){
             /* OpenGL 路径按 Y/U/V 平面上传，统一转成 YUV420P */
             if (frame_for_queue->format != AV_PIX_FMT_YUV420P &&
                 frame_for_queue->format != AV_PIX_FMT_YUVJ420P) {
-                if (!is->sws_ctx) {
-                    is->sws_ctx = sws_getContext(
+                if (!scp->sws_ctx) {
+                    scp->sws_ctx = sws_getContext(
                         frame_for_queue->width, frame_for_queue->height, frame_for_queue->format,
                         frame_for_queue->width, frame_for_queue->height, AV_PIX_FMT_YUV420P,
                         SWS_BILINEAR, NULL, NULL, NULL);
-                    if (!is->sws_ctx) {
-                        av_log(is->video_ctx, AV_LOG_ERROR, "sws_getContext failed\n");
+                    if (!scp->sws_ctx) {
+                        av_log(scp->video_ctx, AV_LOG_ERROR, "sws_getContext failed\n");
                         av_frame_unref(frame_for_queue);
                         continue;
                     }
@@ -184,7 +184,7 @@ void *video_decode_thread(void *arg){
                     continue;
                 }
                 av_frame_copy_props(yuv_frame, frame_for_queue);
-                sws_scale(is->sws_ctx,
+                sws_scale(scp->sws_ctx,
                           (const uint8_t * const *)frame_for_queue->data,
                           frame_for_queue->linesize, 0, frame_for_queue->height,
                           yuv_frame->data, yuv_frame->linesize);
@@ -198,10 +198,10 @@ void *video_decode_thread(void *arg){
             //视频帧持续的时间（ms）
             duration = (frame_rate.num && frame_rate.den ?
                         sc_sec_to_ms(av_q2d((AVRational){frame_rate.den,frame_rate.num})) : 0);
-            is->frame_duration = duration;
+            scp->frame_duration = duration;
             //视频帧呈现时间（ms）
             pts = (frame_for_queue->pts == AV_NOPTS_VALUE) ? NAN : sc_ts_to_ms(frame_for_queue->pts, tb);
-            pts = synchronize_video(is,frame_for_queue,pts);//计算video clock 视频的播放时长，当前的video_clock + 1/tbr(帧率)
+            pts = synchronize_video(scp,frame_for_queue,pts);//计算video clock 视频的播放时长，当前的video_clock + 1/tbr(帧率)
             
             /*
              insert FrameQueue kt_pos: 这是一个 64 位的整数，
@@ -210,7 +210,7 @@ void *video_decode_thread(void *arg){
              */
             //保存视频帧到queue中
             
-            queue_pitcure(is,frame_for_queue,pts,duration,frame_for_queue->pkt_pos);
+            queue_pitcure(scp,frame_for_queue,pts,duration,frame_for_queue->pkt_pos);
             av_frame_unref(frame_for_queue);
         }
     }
@@ -225,93 +225,93 @@ __ERROR:
 
 
 //视频的clock（ms）
-double get_video_clock(VideoState *is){
-    double delta = sc_gettime_ms() - is->video_current_pts_time;
-    return is->video_current_pts + delta;
+double get_video_clock(SCPlayer *scp){
+    double delta = av_gettime_ms() - scp->video_current_pts_time;
+    return scp->video_current_pts + delta;
 }
 
 
 
 /* 克隆后立即出队，与同步无关；busy 时丢弃本帧拷贝，不卡住刷新 */
-static void video_display(VideoState *is){
+static void video_dscpplay(SCPlayer *scp){
     Frame *vp;
     AVFrame *owned;
 
-    if (is->pictq.size == 0 || !is->fn_call) {
+    if (scp->pictq.size == 0 || !scp->player_call_other) {
         return;
     }
     /* GL 忙：照样出队，不送显，避免拖慢同步/解码 */
-    if (is->display_busy) {
-        fream_queue_pop(&is->pictq);
+    if (scp->display_busy) {
+        fream_queue_pop(&scp->pictq);
         return;
     }
-    if (is->quit) {
+    if (scp->quit) {
         return;
     }
-    vp = frame_queue_peek(&is->pictq);
+    vp = frame_queue_peek(&scp->pictq);
     if (!vp || !vp->frame) {
         return;
     }
     owned = av_frame_clone(vp->frame);
-    fream_queue_pop(&is->pictq);
+    fream_queue_pop(&scp->pictq);
     if (!owned) {
         return;
     }
-    is->display_busy = 1;
-    is->fn_call(owned, 1, is, is->userData);
+    scp->display_busy = 1;
+    scp->player_call_other(owned, 1, scp, scp->userData);//呼叫渲染模块
 }
 
 /* 视频落后超过约 1s 开始狂追 */
-static void video_drop_late_frames(VideoState *is, double frame_ms)
+static void video_drop_late_frames(SCPlayer *scp, double frame_ms)
 {
     const double nosync_threshold = 10000.0;
     Frame *vp;
     double diff;
     
-    if (is->av_sync_type != AV_SYNC_AUDIO_MASTER) {
+    if (scp->av_sync_type != AV_SYNC_AUDIO_MASTER) {
         return;
     }
-    if (isnan(is->audio_clock)) {
+    if (isnan(scp->audio_clock)) {
         return;
     }
     
-    while (is->pictq.size > 1) {
-        vp = frame_queue_peek(&is->pictq);
-        diff = vp->pts - get_maste_clock(is);
+    while (scp->pictq.size > 1) {
+        vp = frame_queue_peek(&scp->pictq);
+        diff = vp->pts - get_maste_clock(scp);
         if (isnan(diff) || fabs(diff) <= nosync_threshold) {
             break;
         }
-        fream_queue_pop(&is->pictq);
-        is->frame_last_pts = vp->pts;
+        fream_queue_pop(&scp->pictq);
+        scp->frame_last_pts = vp->pts;
     }
 }
 
 void video_refresh_timer_tmp(void *userdata){
     
-    VideoState *is = (VideoState*)userdata;
+    SCPlayer *scp = (SCPlayer*)userdata;
     Frame *vp = NULL;
     double diff,ref_clock = 0;
     
-    if(is->video_st){
+    if(scp->video_st){
         
-        if(is->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
-            is->delay_video_time = 1;// 1ms 调用
-        } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {
-            is->delay_video_time = 5;//音频时钟尚未建立：先别开跑，避免启动阶段乱追
+        if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
+            scp->delay_video_time = 1;// 1ms 调用
+        } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {
+            scp->delay_video_time = 5;//音频时钟尚未建立：先别开跑，避免启动阶段乱追
         } else {
             //下一帧视频播放时间
-            vp = frame_queue_peek(&is->pictq);//读起视频帧
-            ref_clock = get_maste_clock(is);//播放到的音频时刻（ms）
+            vp = frame_queue_peek(&scp->pictq);//读起视频帧
+            ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
             diff = vp->pts - ref_clock;
-            is->delay_video_time = diff;
+            scp->delay_video_time = diff;
             if(diff <= 0){
                 diff = 0;
             }
-            video_display(is);
+            video_dscpplay(scp);
             printf("diff = %.2f ms \n",diff);
         }
     } else {
-        is->delay_video_time = 100;//等待打开视频流
+        scp->delay_video_time = 100;//等待打开视频流
     }
     
 }
@@ -320,50 +320,50 @@ void video_refresh_timer_tmp(void *userdata){
 void video_refresh_timer(void *userdata){
     return video_refresh_timer_tmp(userdata);
     
-    VideoState *is = (VideoState*)userdata;
+    SCPlayer *scp = (SCPlayer*)userdata;
     Frame *vp = NULL;
     double actual_delay,delay,sync_threshold,ref_clock,diff = 0;
-    double frame_ms = sc_video_frame_ms(is); //视频帧默认时间
+    double frame_ms = sc_video_frame_ms(scp); //视频帧默认时间
     
-    if(is->video_st){
+    if(scp->video_st){
         
-        if(is->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
-            is->delay_video_time = 1;// 1ms 调用
-        } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(is->audio_clock)) {//音频时钟尚未建立：先别开跑，避免启动阶段乱追
-            is->delay_video_time = 5;
+        if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
+            scp->delay_video_time = 1;// 1ms 调用
+        } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {//音频时钟尚未建立：先别开跑，避免启动阶段乱追
+            scp->delay_video_time = 5;
         } else {
             /* 若已明显落后，先丢到接近音频再算 delay */
-            video_drop_late_frames(is, frame_ms);
+            video_drop_late_frames(scp, frame_ms);
            
             
             //计算下一帧的显示时间
-            vp = frame_queue_peek(&is->pictq);//读起视频帧
+            vp = frame_queue_peek(&scp->pictq);//读起视频帧
             // printf("PTS = %f ms\n",vp->pts);
-            is->video_current_pts = vp->pts;//对is的赋值，将要播放的视频帧的pts
-            is->video_current_pts_time = sc_gettime_ms();//但前时钟（ms）
+            scp->video_current_pts = vp->pts;//对scp的赋值，将要播放的视频帧的pts
+            scp->video_current_pts_time = av_gettime_ms();//但前时钟（ms）
             
-            if(is->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
+            if(scp->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
                 delay = frame_ms;
             } else {
-                delay = vp->pts - is->frame_last_pts;//将要播放的一帧和上一帧的时间间隔（ms）
+                delay = vp->pts - scp->frame_last_pts;//将要播放的一帧和上一帧的时间间隔（ms）
             }
             
             /* 非法间隔：<=0 或 >=1s(1000ms) 时回退到上一帧 delay，再不行用 fps 帧间隔 */
             if(delay <= 0 || delay >= 1000.0){
-                delay = (is->frame_last_delay > 0) ? is->frame_last_delay : frame_ms;
+                delay = (scp->frame_last_delay > 0) ? scp->frame_last_delay : frame_ms;
             }
             //跟新frame_last_delay，frame_last_pts
-            is->frame_last_delay = delay;
-            is->frame_last_pts = vp->pts;
+            scp->frame_last_delay = delay;
+            scp->frame_last_pts = vp->pts;
             
             //推算下一帧视频时间和音频同步，计算delay来同步
-            if(is->av_sync_type == AV_SYNC_AUDIO_MASTER){
-                ref_clock = get_maste_clock(is);//播放到的音频时刻（ms）
+            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+                ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
                 diff = vp->pts - ref_clock;//将要播放的视频帧 - 播放到的音频时刻 (正常情况下将要播放的视频帧要等diff才可以播放)
             }
             
             /* Skip or repeat the frame. Take delay into account
-             FFPlay still doesn't "know if this is the best guess."
+             FFPlay still doesn't "know if thscp scp the best guess."
              对齐 ffplay compute_target_delay（本工程时间单位为 ms）
              
              sync_threshold = clamp(delay, 40ms, 100ms)
@@ -394,21 +394,21 @@ void video_refresh_timer(void *userdata){
             
             printf("DIFF = %f ms  delay = %f ms \n", diff, delay);
             
-            is->frame_timer += delay;//推算出下一帧的显示时间点（ms）
+            scp->frame_timer += delay;//推算出下一帧的显示时间点（ms）
             /* computer the REAL delay
              一帧确定好系统时间后，后面就将要播放的帧的时间换算成系统时间，
              如果发现要播放的帧的时间落后于系统时间就将其播放出来。
              */
-            actual_delay = is->frame_timer - sc_gettime_ms();
+            actual_delay = scp->frame_timer - av_gettime_ms();
             if (actual_delay < 0) {
                 actual_delay = 0;
             }
-            is->delay_video_time = actual_delay;
-            video_display(is);
+            scp->delay_video_time = actual_delay;
+            video_dscpplay(scp);
         }
         
     } else {
-        is->delay_video_time = 100;//等待打开视频流
+        scp->delay_video_time = 100;//等待打开视频流
     }
     
 }

@@ -31,9 +31,9 @@
     
     
     AVFormatContext *formatContext;
-    dispatch_queue_t decode_dispatch_queue;
-    dispatch_queue_t audio_play_dispatch_queue;
-    dispatch_queue_t video_render_dispatch_queue;
+    dispatch_queue_t decode_dscppatch_queue;
+    dispatch_queue_t audio_play_dscppatch_queue;
+    dispatch_queue_t video_render_dscppatch_queue;
     AVPacket *packet;
     /// lock shared variate
     pthread_mutex_t mutex;
@@ -43,67 +43,74 @@
     
     AudioQueueBufferRef audioQueueBuffers[NUM_BUFFERS];
     FILE *pcmFile;
-    VideoState *is;
+    SCPlayer *scp;
 }
-
+/*
+ AudioQueue 和 SDL 不一样
+ AudioQueue要数据
+ 你自己定，最多 mAudioDataBytesCapacity
+ 上次消耗了多少mAudioDataByteSize
+ */
 // AudioQueue回调：buffer 播完回收后再填下一帧
 void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
     if (!inUserData || !inBuffer) {
         return;
     }
+    
+    printf("音频需要的 %d \n",inBuffer->mAudioDataByteSize);
 
-    SCAudioQueuePlayer *scp = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
-    VideoState *is = scp->is;
-    if (!is || is->audioq.nb_packets <= 0) {
+    SCAudioQueuePlayer *queuePlayer = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
+    SCPlayer *scp = queuePlayer->scp;
+    
+    if (!scp || scp->audioq.nb_packets <= 0) {
         /* 尚无数据：填静音并重新入队，避免队列饿死 */
         memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataBytesCapacity);
         inBuffer->mAudioDataByteSize = inBuffer->mAudioDataBytesCapacity > 0
             ? (UInt32)FFMIN(BUFFER_SIZE, inBuffer->mAudioDataBytesCapacity)
             : 0;
-        if (inBuffer->mAudioDataByteSize > 0 && scp->audioQueue) {
-            AudioQueueEnqueueBuffer(scp->audioQueue, inBuffer, 0, NULL);
+        if (inBuffer->mAudioDataByteSize > 0 && queuePlayer->audioQueue) {
+            AudioQueueEnqueueBuffer(queuePlayer->audioQueue, inBuffer, 0, NULL);
         }
         return;
     }
-
-    /* 本 buffer 刚播完，从硬件队列字节里扣掉上次写入的长度 */
-    audio_queue_consumed(is, (int)inBuffer->mAudioDataByteSize);
     
-    audio_decode_callback(is,NULL,0);
-    int buff_size = is->out_audio_size;
-    if(!is->audio_buf || buff_size <= 0) {
+    //ffmpeg解码
+    audio_decode_callback(scp,NULL,0);
+    int buff_size = scp->out_audio_size;// 解码后的字节数
+    if(!scp->audio_buf || buff_size <= 0) {
         if (buff_size <= 0) {
             AudioQueueStop(inAQ, false);
             NSLog(@"音频播放结束");
         }
         return;
     }
-
+    
+    //这个只是一个保护, 前提是scplayer每次多没有填满,所以每次添入的都被消耗了
     if (buff_size > (int)inBuffer->mAudioDataBytesCapacity) {
         buff_size = (int)inBuffer->mAudioDataBytesCapacity;
     }
-    
+    //ffmpeg中拷贝音频到iOS音频设备中
     inBuffer->mAudioDataByteSize = (UInt32)buff_size;
-    memcpy(inBuffer->mAudioData, is->audio_buf, inBuffer->mAudioDataByteSize);
-    AudioQueueEnqueueBuffer(scp->audioQueue, inBuffer, 0, NULL);
-    audio_queue_wrote(is, buff_size);
+    memcpy(inBuffer->mAudioData, scp->audio_buf, (UInt32)buff_size);
+    AudioQueueEnqueueBuffer(queuePlayer->audioQueue, inBuffer, 0, NULL);
+    audio_queue_wrote(scp, buff_size);//增加硬件水位
 }
 
 
 
 
-- (void)initializeAudioQueue:(VideoState *)is {
-    self->is = is;
+- (void)initializeAudioQueue:(SCPlayer *)scp {
+    self->scp = scp;
 
     /// 播放器播放时的ffmpeg采样格式
     /// 指定了播放器在读取数据时的数据长度(一帧多少个字节)
     AudioStreamBasicDescription asbd;
     /// 采样率
-    asbd.mSampleRate = is->audioInfo.freq;
+    asbd.mSampleRate = scp->audioInfo.freq;
     /// 音频流格式
     asbd.mFormatID = kAudioFormatLinearPCM;
     /// 每一帧音频格式的通道数
-    asbd.mChannelsPerFrame = is->audioInfo.channels;
+    asbd.mChannelsPerFrame = scp->audioInfo.channels;
     /// 一个pacet有多少个采样帧
     /// 一个采样帧就是一次声道数据采集
     /// PCM这个值是1
@@ -114,12 +121,12 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
     asbd.mBytesPerFrame = 4;
     /// 一个packet所占的字节数
     asbd.mBytesPerPacket = asbd.mFramesPerPacket * asbd.mBytesPerFrame;
-    /// kLinearPCMFormatFlagIsSignedInteger: 存储的数据类型
-    /// kAudioFormatFlagIsPacked: 数据交叉排列
+    /// kLinearPCMFormatFlagisSignedInteger: 存储的数据类型
+    /// kAudioFormatFlagscpPacked: 数据交叉排列
     asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     asbd.mReserved = 0;
     OSStatus status = AudioQueueNewOutput(&asbd,
-                                          OutputBufferCallback,
+                                          OutputBufferCallback,//iOS音频回掉函数设置
                                           (__bridge void *)(self),
                                           NULL,
                                           NULL,

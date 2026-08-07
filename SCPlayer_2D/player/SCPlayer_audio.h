@@ -11,12 +11,11 @@
 
 #include "SCPlayer.h"
 
-int audio_open(void *opaque,
+int audio_wanted_spec(void *opaque,
                AVChannelLayout *wanted_channel_layout,
                int wented_salple_rate);
 void audio_decode_callback(void *userdata, uint8_t *stream, int len);
-void audio_queue_wrote(VideoState *is, int bytes);
-void audio_queue_consumed(VideoState *is, int bytes);
-double get_audio_clock(VideoState *is);
+void audio_queue_wrote(SCPlayer *scp, int bytes);
+double get_audio_clock(SCPlayer *scp);
 
 #endif /* SCPlayer_audio_h */
