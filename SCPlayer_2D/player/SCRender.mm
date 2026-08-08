@@ -522,13 +522,8 @@ glm::mat4 view = glm::mat4(1.0f);
         }
         double t_p1 = sc_gl_now_ms();
         
-        double clear_ms = t_c1 - t0;
-        double upload_ms = t_u1 - t_c1;
-        double draw_ms = t_d1 - t_d0;
-        double present_ms = t_p1 - t_p0;
-        double total_ms = t_p1 - t0;
-//        printf("GL: clear=%.3f ms | upload=%.3f ms | draw=%.3f ms | present=%.3f ms | total=%.3f ms\n",
-//               clear_ms, upload_ms, draw_ms, present_ms, total_ms);
+        (void)t_c1; (void)t_u1; (void)t_d0; (void)t_d1; (void)t_p0;
+        self.lastDisplayMs = t_p1 - t0; /* GL 总耗时 → 日志 display */
         if (completionBlock) completionBlock(YES);
     });
 }

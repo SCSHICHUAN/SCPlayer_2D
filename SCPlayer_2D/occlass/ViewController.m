@@ -70,7 +70,8 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 -(CGFloat)fittingWidthForButtonTitle:(NSString *)title;
 -(void)buildControls;
 -(void)buildDiffTextView;
--(void)appendDiffLog:(double)diffMs;
+-(void)appendDiffLog:(double)diffMs displayMs:(double)displayMs
+             videoMB:(double)videoMB audioMB:(double)audioMB;
 -(void)clearDiffLog;
 -(void)toggleControlsVisibility;
 -(void)onCenterTap:(UITapGestureRecognizer *)gr;
@@ -144,18 +145,19 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         }
         vc.playingIs = scp;
         vc.cRender.rotateDegrees = scp->video_rotate;
-        /* delay_video_time 即本帧 pts−音频时钟；主线程追加到 diff 日志（最多 100 条） */
         double diffMs = scp->delay_video_time;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (vc.playingIs == scp) {
-                [vc appendDiffLog:diffMs];
-            }
-        });
+        double videoMB = scp->videoq.size / (1024.0 * 1024.0);
+        double audioMB = scp->audioq.size / (1024.0 * 1024.0);
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
+            double displayMs = vc.cRender.lastDisplayMs;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (vc.playingIs == scp) {
+                    [vc appendDiffLog:diffMs displayMs:displayMs videoMB:videoMB audioMB:audioMB];
+                }
+            });
             AVFrame *owned = frame;
             av_frame_free(&owned);
-            /* 已切走片源则不要再写已释放的 SCPlayer */
             if (vc.playingIs == scp) {
                 scp->display_busy = 0;
             }
@@ -642,14 +644,19 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     ]];
 }
 
--(void)appendDiffLog:(double)diffMs{
+-(void)appendDiffLog:(double)diffMs displayMs:(double)displayMs
+             videoMB:(double)videoMB audioMB:(double)audioMB{
     if (!self.diffTextView) {
         return;
     }
     if (!self.diffLines) {
         self.diffLines = [NSMutableArray array];
     }
-    [self.diffLines addObject:[NSString stringWithFormat:@"diff = %.2f ms", diffMs]];
+    /* 精简一行：同步差 | 渲染耗时 | 音视频包缓存 */
+    NSString *line = [NSString stringWithFormat:
+                      @"diff:%.1fms display:%.1fms video:%.2fMB audio:%.2fMB",
+                      diffMs, displayMs, videoMB, audioMB];
+    [self.diffLines addObject:line];
     while (self.diffLines.count > 100) {
         [self.diffLines removeObjectAtIndex:0];
     }
