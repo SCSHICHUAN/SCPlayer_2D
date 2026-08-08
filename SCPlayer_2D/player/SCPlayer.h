@@ -106,7 +106,14 @@ typedef struct SCPlayer{
     //音视频同步相关
     int av_sync_type;
 
-    double          audio_clock;     //音频时钟（ms）
+    double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
+    double          audio_write_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
+    double          audio_lin_wall_ms;// 上次 wrote 时的墙钟（ms）
+    unsigned int    audio_lin_bytes;  // 上次 wrote 的盒大小（线性 0~size）
+    int             audio_lin_ready;  // 已有至少一次 wrote
+    int             audio_lin_paused;
+    double          audio_lin_elapsed_ms; /* 暂停时冻结的已流逝时长 */
+    pthread_mutex_t audio_clock_mutex;
     double          frame_timer;     //下一帧应对齐的墙钟时刻（ms）
     double          frame_last_pts;  //上一帧视频 pts（ms）
     double          frame_last_delay;//上一帧间隔 delay（ms）
@@ -123,7 +130,6 @@ typedef struct SCPlayer{
     uint8_t         *audio_buf;      // 解码后到音频数据
     unsigned int    audio_buf_size;  // 当前软件缓冲字节数
     unsigned int    audio_buf_cursor; // 本帧已交给 AudioQueue 的字节数
-    unsigned int    audio_aq_size;   // AudioQueue 中尚未播完的字节数（水位）
     AVFrame         audio_frame;     //音频的frame
     AVPacket        audio_pkt;       //音频包
     uint8_t         *audio_pkt_data; //音频原始数据

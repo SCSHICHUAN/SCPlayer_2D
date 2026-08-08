@@ -103,11 +103,11 @@ int audion_queue_call_other(void *userData, int flag, int len,
         return 0;
     }
     if (flag == 1) {
-        audio_queue_consumed(scp, len);//已经消耗
+        /* 已不再用于水位；保留分支兼容 */
         return 0;
     }
     if (flag == 2) {
-        audio_queue_wrote(scp, len);//添入增加
+        audio_queue_wrote(scp, len); /* 入队 + 对齐上一盒 + 开本盒插值 */
         return 0;
     }
     return 0;
@@ -301,9 +301,11 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     if (self.audioPaused) {
         [self.audioPlayer resume];
         self.audioPaused = NO;
+        audio_aq_set_paused(self.playingIs, 0);
     } else {
         [self.audioPlayer pause];
         self.audioPaused = YES;
+        audio_aq_set_paused(self.playingIs, 1);
     }
     [self updateAllPauseButtonTitles];
 }
@@ -327,6 +329,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             [self.audioPlayer resume];
         }
         self.audioPaused = NO;
+        audio_aq_set_paused(scp, 0);
     } else {
         /* 同步暂停音视频 */
         scp->vidoe_stop = 1;
@@ -334,6 +337,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             [self.audioPlayer pause];
         }
         self.audioPaused = YES;
+        audio_aq_set_paused(scp, 1);
     }
     [self updateAllPauseButtonTitles];
 }

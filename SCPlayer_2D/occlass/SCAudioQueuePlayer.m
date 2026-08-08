@@ -45,10 +45,7 @@ static void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueu
         return;
     }
 
-    /* 上一盒已播完：通知业务扣水位（PCM 可能已覆盖，只传字节） */
-    if (inBuffer->mAudioDataByteSize > 0) {
-        audion_queue_call_other(scp_player, 1, (int)inBuffer->mAudioDataByteSize, NULL, NULL);
-    }
+    /* 水位插值/对齐只走 flag 2（wrote）；两次写入之间由内核线性消耗 */
 
     uint8_t *pcm = NULL;
     int pcmSize = 0;

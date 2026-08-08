@@ -178,12 +178,11 @@ get_audio_clock = 耳朵正在听到的媒体时间
 视频拿这个偏大的主时钟去追 → 口型/画面容易系统性偏一会儿
 ```
 
-即便引入水位 `audio_aq_size`（入队 +、播完 −），仍有第二层不准：
+即便引入水位 `audio_aq_size`（入队记账），仍有第二层不准：
 
-- AudioQueue **没有**「盒播到一半」的回调，只有整盒播完才进 `OutputBufferCallback`
-- 因此 `wrote` / `consumed` 只能在 **整盒边界** 改账
-- 两次回调之间：`cursor`、`aq_size` 不变 → `get_audio_clock` **冻住**
-- 真实 DAC 在往前走，时钟要等下次 `consumed` 才跳一下
+- AudioQueue **没有**「盒播到一半」的回调，接点只在整盒边界（本工程用两次 `wrote`）
+- 若只在接点改账：两次回调之间时钟会**冻住**
+- 因此需要在两次 `wrote` 之间做线性插值补进度
 
 所以问题可以概括成两句：
 
@@ -192,70 +191,25 @@ get_audio_clock = 耳朵正在听到的媒体时间
 
 另外：解码会覆盖 `audio_buf`，软件侧留不住「还在硬件里的上一帧 PCM」，硬件延迟只能靠 **字节账**（或自己存多盒数据），不能幻想从 FFmpeg 里再读出上一包。
 
-### 5.2 本工程方案（折中）
+### 5.2 本工程方案（wrote 重置 + 线性时钟）
 
 公式：
 
 ```text
-audio_clock      = 本帧 pts（起点，ms）
-audio_buf_cursor = 本帧已 Enqueue 的字节
-audio_aq_size    = AQ 中尚未播完的字节（水位，只记账，不存 PCM）
-
-get_audio_clock ≈
-    audio_clock
-  + cursor 对应时长          // 本帧已交给设备的部分
-  − audio_aq_size 对应时长   // 扣掉「进了设备但还没播完」
+解码 → audio_write_pts = 帧 pts（不进主时钟）
+wrote(flag 2) → 重置：audio_clock = write_pts，记下墙钟与本盒 size
+get_audio_clock = audio_clock + min(墙钟差, 本盒时长)   // 0~size 线性
 ```
 
-回调时机（关键）：
-
-```text
-进 OutputBufferCallback 时，mAudioDataByteSize 仍是「上一盒」写入长度
-  → audio_queue_consumed(...)   // 水位 ↓，承认上一盒播完
-
-解码 → memcpy → Enqueue(本盒)
-  → audio_queue_wrote(buff_size) // cursor ↑、水位 ↑
-```
-
-取舍含义：
-
-| 做了什么 | 没做什么 |
-|----------|----------|
-| 用水位区分「已拷贝」和「未播完」，减轻「一写入时钟就偏大」 | 不在盒内按采样连续掉水位 |
-| 不存多盒 PCM，和「解码即覆盖」兼容 | 两次回调之间时钟冻结 |
-| 实现简单，同步大体可用 | 不追求采样级 / 盒内精确 |
-
-**结论：** 这是在复杂度、内存模型与可用精度之间的 **有意折中**——承认「盒级较准、盒内有误差」，不假装已经精确到耳朵。
+只认 flag 2。视频 `tmp` 路径：算 diff 后送显，再用 `delay_video_time` 控制下一轮节奏。暂停时冻结音频已流逝时长。
 
 单位：全程 **ms**；`bytes_per_sec = sample_rate × channels × 2`（S16）。  
 `audio_clock == NAN` 时视频侧勿狂追。  
 `ref_clock` → `get_master_clock()` → 音频主时钟时即 `get_audio_clock()`。
 
-### 5.3 终极方案（更贴耳，未实现）
+### 5.3 更贴耳的扩展（可选）
 
-目标：任意时刻（含两次 `OutputBufferCallback` 之间）都能估出接近真实播放点的时钟。
-
-常见做法（与 ffplay 一类思路接近）：
-
-1. **仍维护** 队列字节 / 水位（或系统 API 查询已排队未播字节，若平台提供）  
-2. 在每次音频回调里记录：  
-   - `audio_callback_time`（墙钟）  
-   - 当时的媒体时钟基准 `clock_base`  
-3. 任意时刻：  
-
-```text
-get_audio_clock ≈
-    clock_base
-  + (now_wall − audio_callback_time)     // 盒内用墙钟往前推
-  − （仍排队未播字节 / bytes_per_sec）   // 继续扣硬件延迟
-```
-
-并做钳制（不能超过下一帧 pts、暂停时冻结墙钟差等）。
-
-还可选：自己环形缓冲保存「已交给设备未播完」的 PCM 与时间戳，播完再释放——模型最硬，内存与复杂度更高。
-
-终极方案解决的是：**写入 ≠ 播放**（持续扣未播完）+ **盒内冻结**（墙钟插值）。  
-本工程未上这套，以免过早引入暂停/追帧/多实例等边界复杂度；当前盒级水位方案作为工程折中保留。
+若还要再贴耳，可在回调里记 `clock_base` + `audio_callback_time`，读时钟时用墙钟差往前推，并对暂停/追帧做钳制；或环形缓冲保存未播完 PCM。当前线性水位已覆盖「盒内冻结」的主要痛点。
 
 ---
 
@@ -278,8 +232,8 @@ get_audio_clock ≈
 ```text
 flag 0：解码取 PCM → 出参 outPCM / outSize
         返回 0 有数据 / 1 暂无填静音 / -1 结束停播
-flag 1：上一盒播完 → consumed(len)   （进回调时 mAudioDataByteSize 仍是上一盒）
-flag 2：本盒已 Enqueue → wrote(len)
+flag 2：本盒已 Enqueue → wrote(len)：入队 + 对齐 + 开插值
+flag 1：保留编号，设备层不再调用
 
 初始化：只传 sampleRate / channels / userData，不传 SCPlayer 类型
 ```
@@ -293,7 +247,7 @@ flag 2：本盒已 Enqueue → wrote(len)
 | 可替换 | 同一套回调可接别的 PCM 源，或把 AudioQueue 换成其他输出，内核不动 |
 | 可测 | 可用假回调喂静音/固定 PCM，单独验证 Enqueue / pause，不必拉起整条解复用 |
 | 与视频侧对称 | 视频已是 `frame_call_bacl` 送显；音频同样「模块回调、接入方实现」，边界一致 |
-| 水位仍在内核 | `wrote` / `consumed` 留在 `SCPlayer_audio`，时钟公式不泄漏进 OC |
+| 水位仍在内核 | `wrote` 插值/对齐留在 `SCPlayer_audio`，时钟公式不泄漏进 OC |
 
 注意：初始化前必须先设好回调；`initialize` 会立刻预填若干 buffer 并触发回调。
 
@@ -328,7 +282,7 @@ SCPlayer_2D/
 |----|------|
 | 送显解耦 | 去掉 `frame_display_pending`；`video_display` 里 `av_frame_clone` 后立刻出队，回调只 `av_frame_free` |
 | `display_busy` | 放在 `VideoState`，只决定是否送 GL，**不参与** delay / 同步计算；忙则出队丢显 |
-| 音频设备解耦 | `SCAudioQueuePlayer` 不依赖 `SCPlayer`；经 `Audion_queue_call_other` 取 PCM / wrote / consumed |
+| 音频设备解耦 | `SCAudioQueuePlayer` 不依赖 `SCPlayer`；经 `Audion_queue_call_other` 取 PCM / wrote（插值与对齐） |
 | 同步 | 对齐 ffplay：`sync_threshold` 夹 delay，落后 `delay+diff`，超前长帧补 diff、短帧 `2*delay` |
 | 休眠 | `delay_video_time` 与 `sc_delay_ms` 统一为 `double`（ms） |
 | 换片 | `scplayer_stop` 停旧实例；`clearDisplay` 清黑屏；避免旧帧/旧 busy 残留 |

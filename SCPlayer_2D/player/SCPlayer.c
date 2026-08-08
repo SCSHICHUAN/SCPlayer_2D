@@ -606,10 +606,12 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             }
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
-            scp->audio_aq_size = 0;
+            scp->audio_clock = NAN;
+            scp->audio_write_pts = NAN;
             scp->audio_st = st;
             scp->audio_index = stream_index;
             scp->audio_ctx = avctx;
+            audio_aq_interp_start(scp);
             
             //打开音频设备开始播放  SDL_PauseAudio(0);
             scp->player_call_other(NULL,0,scp,scp->userData);
@@ -784,10 +786,11 @@ static void stream_component_close(SCPlayer *scp, int stream_index){
     switch (codecpar->codec_type) {
         case AVMEDIA_TYPE_AUDIO:
             //      SDL_CloseAudio();
+            audio_aq_interp_stop(scp);
             swr_free(&scp->audio_swr_ctx);
             av_freep(&scp->audio_buf);
             scp->audio_buf = NULL;
-            
+
             break;
         case AVMEDIA_TYPE_VIDEO:
             frame_queue_abort(&scp->pictq);

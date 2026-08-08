@@ -267,14 +267,15 @@ static void video_drop_late_frames(SCPlayer *scp, double frame_ms)
     const double nosync_threshold = 10000.0;
     Frame *vp;
     double diff;
-    
+
+    (void)frame_ms;
     if (scp->av_sync_type != AV_SYNC_AUDIO_MASTER) {
         return;
     }
     if (isnan(scp->audio_clock)) {
         return;
     }
-    
+
     while (scp->pictq.size > 1) {
         vp = frame_queue_peek(&scp->pictq);
         diff = vp->pts - get_maste_clock(scp);
@@ -287,13 +288,13 @@ static void video_drop_late_frames(SCPlayer *scp, double frame_ms)
 }
 
 void video_refresh_timer_tmp(void *userdata){
-    
+
     SCPlayer *scp = (SCPlayer*)userdata;
     Frame *vp = NULL;
     double diff,ref_clock = 0;
-    
+
     if(scp->video_st){
-        
+
         if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
             scp->delay_video_time = 1;// 1ms 调用
         } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {
@@ -313,7 +314,7 @@ void video_refresh_timer_tmp(void *userdata){
     } else {
         scp->delay_video_time = 100;//等待打开视频流
     }
-    
+
 }
 
 /* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
