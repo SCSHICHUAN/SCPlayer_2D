@@ -91,7 +91,7 @@ void *video_decode_thread(void *arg){
         if(scp->quit){
             break;
         }
-        //以非阻塞的方式从队列中获取包，如果没有就直接返回，并且等待10ms在取,直到读取取
+        /* 非阻塞取包；成功时 av_packet_move_ref 把压缩包所有权转到 video_pkt */
         ret = packet_queue_get(&scp->videoq,&scp->video_pkt,0);
         if(ret <= 0){
             av_log(scp->video_ctx,AV_LOG_DEBUG,"video delay 10 ms\n");
@@ -213,10 +213,13 @@ void *video_decode_thread(void *arg){
             queue_pitcure(scp,frame_for_queue,pts,duration,frame_for_queue->pkt_pos);
             av_frame_unref(frame_for_queue);
         }
+        /* 所有权在 packet_queue_get → av_packet_move_ref(pkt, …) 已转到 video_pkt，用完必须放 */
+        av_packet_unref(&scp->video_pkt);
     }
     
     ret = 0;
 __ERROR:
+    av_packet_unref(&scp->video_pkt);
     av_frame_free(&video_frame);
     av_frame_free(&sw_frame);
     av_frame_free(&yuv_frame);
