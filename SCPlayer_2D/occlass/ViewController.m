@@ -46,6 +46,8 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @property(nonatomic,strong)UIView *controlsBar;
 @property(nonatomic,assign)BOOL controlsVisible;
 @property(nonatomic,assign)SCPlayer *playingIs;
+@property(nonatomic,strong)UITextView *diffTextView;
+@property(nonatomic,strong)NSMutableArray<NSString *> *diffLines;
 -(void)initAudio:(void *)opaque;
 -(void)startPlayWithPath:(NSString *)path;
 -(void)playURLFromField;
@@ -67,6 +69,9 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
                  topConstant:(CGFloat)topConstant;
 -(CGFloat)fittingWidthForButtonTitle:(NSString *)title;
 -(void)buildControls;
+-(void)buildDiffTextView;
+-(void)appendDiffLog:(double)diffMs;
+-(void)clearDiffLog;
 -(void)toggleControlsVisibility;
 -(void)onCenterTap:(UITapGestureRecognizer *)gr;
 -(NSString *)albumVideosDirectory;
@@ -139,6 +144,13 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         }
         vc.playingIs = scp;
         vc.cRender.rotateDegrees = scp->video_rotate;
+        /* delay_video_time 即本帧 pts−音频时钟；主线程追加到 diff 日志（最多 100 条） */
+        double diffMs = scp->delay_video_time;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (vc.playingIs == scp) {
+                [vc appendDiffLog:diffMs];
+            }
+        });
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
             AVFrame *owned = frame;
@@ -212,6 +224,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
     /* 切换片源：先停旧实例并清屏 */
     [self stopCurrentPlayback];
+    [self clearDiffLog];
     [self.view endEditing:YES];
 
     self.end = NO;
@@ -598,6 +611,58 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.cRender.msaaLevel = SCRenderMSAA4x;
     [self updateModeButtonTitle];
     [self updateAllPauseButtonTitles];
+    [self buildDiffTextView];
+}
+
+-(void)buildDiffTextView{
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectZero];
+    tv.translatesAutoresizingMaskIntoConstraints = NO;
+    tv.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+    tv.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+    tv.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+    tv.editable = NO;
+    tv.selectable = NO;
+    tv.scrollEnabled = YES;
+    tv.showsVerticalScrollIndicator = YES;
+    tv.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    tv.layer.cornerRadius = 8;
+    tv.clipsToBounds = YES;
+    tv.text = @"";
+    self.diffTextView = tv;
+    self.diffLines = [NSMutableArray array];
+
+    [self.view addSubview:tv];
+    [self.view bringSubviewToFront:tv];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [tv.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [tv.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [tv.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-12],
+        [tv.heightAnchor constraintEqualToConstant:100],
+    ]];
+}
+
+-(void)appendDiffLog:(double)diffMs{
+    if (!self.diffTextView) {
+        return;
+    }
+    if (!self.diffLines) {
+        self.diffLines = [NSMutableArray array];
+    }
+    [self.diffLines addObject:[NSString stringWithFormat:@"diff = %.2f ms", diffMs]];
+    while (self.diffLines.count > 100) {
+        [self.diffLines removeObjectAtIndex:0];
+    }
+    self.diffTextView.text = [self.diffLines componentsJoinedByString:@"\n"];
+    NSUInteger len = self.diffTextView.text.length;
+    if (len > 0) {
+        [self.diffTextView scrollRangeToVisible:NSMakeRange(len - 1, 1)];
+    }
+}
+
+-(void)clearDiffLog{
+    [self.diffLines removeAllObjects];
+    self.diffTextView.text = @"";
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -616,8 +681,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.controlsVisible = !self.controlsVisible;
     [UIView animateWithDuration:0.2 animations:^{
         self.controlsBar.alpha = self.controlsVisible ? 1.0 : 0.0;
+        self.diffTextView.alpha = self.controlsVisible ? 1.0 : 0.0;
     }];
     self.controlsBar.userInteractionEnabled = self.controlsVisible;
+    self.diffTextView.userInteractionEnabled = self.controlsVisible;
 }
 
 -(void)onCenterTap:(UITapGestureRecognizer *)gr{
@@ -634,6 +701,9 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     }
     /* 控件显示且点在控件上时，交给按钮，不切换 */
     if (self.controlsVisible && CGRectContainsPoint(self.controlsBar.frame, p)) {
+        return;
+    }
+    if (self.controlsVisible && CGRectContainsPoint(self.diffTextView.frame, p)) {
         return;
     }
     [self toggleControlsVisibility];
