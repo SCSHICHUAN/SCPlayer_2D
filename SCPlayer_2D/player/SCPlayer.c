@@ -898,13 +898,13 @@ static void do_exit(SCPlayer *scp){
 
 static void video_refresh_loop(SCPlayer *scp){
     for(;;){
-        if(scp->vidoe_stop == 1){
-            /* 视频暂停、音频继续：勿空转占满 CPU */
-            sc_delay_ms(10);
-            continue;
-        }
         if (scp->quit) {
             break;
+        }
+        if(scp->vidoe_stop == 1){
+            /* 视频暂停：休眠；必须先查 quit，否则 stop 时 join 会死锁 */
+            sc_delay_ms(10);
+            continue;
         }
         video_refresh_timer(scp);
         if (scp->quit) {
