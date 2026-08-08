@@ -259,6 +259,44 @@ flag 1：保留编号，设备层不再调用
 - **送显所有权**：clone 后出队；回调里 `av_frame_free`，不要再次 `fream_queue_pop`
 - **大文件**：仓库中的 `libavcodec.a`、样片 mp4 可能超过 GitHub 建议大小，克隆/推送留意 LFS
 
+### 7.1 冷启动音频爆破音（AVAudioSession）
+
+**现象**：杀进程后第一次点播放有「啪/爆」一声；播起来后再换片则正常。
+
+**原因**：冷启动时 `AVAudioSession` 尚未 `setActive`，首帧 `AudioQueueStart` 才同时激活 session、拉起 DAC，并立刻送 PCM。硬件从静音突然接到有幅度波形 → 爆音。换片时 session 已热，只是换数据源，故正常。
+
+**处理（少量代码）**：进播前预热一次即可：
+
+```text
+[SCAudioQueuePlayer warmUpAudioSession]
+  → setCategory(Playback) + setActive(YES)   // dispatch_once
+```
+
+当前在 `ViewController.viewDidLoad` 调用。与 A/V 同步、时钟公式无关。
+
+### 7.2 暂停后再选片卡死（刷新线程 join）
+
+**现象**：点「暂停」（或 V 暂停使 `vidoe_stop=1`）后再选视频，主线程卡住。
+
+**原因**：
+
+```text
+选片 → stopCurrentPlayback → scplayer_stop
+     → quit=1 → pthread_join(video_loop)
+```
+
+若 `video_refresh_loop` 在 `vidoe_stop==1` 时只 `sleep` / `continue`、**不查 `quit`**，刷新线程永远不退出，`join` 死等 → UI 卡死。
+
+**处理**：循环每轮**先查 `quit` 再处理暂停**：
+
+```text
+for (;;) {
+    if (quit) break;
+    if (vidoe_stop) { sleep 10ms; continue; }
+    refresh + delay...
+}
+```
+
 ---
 
 ## 结构（简）
@@ -286,6 +324,8 @@ SCPlayer_2D/
 | 同步 | 对齐 ffplay：`sync_threshold` 夹 delay，落后 `delay+diff`，超前长帧补 diff、短帧 `2*delay` |
 | 休眠 | `delay_video_time` 与 `sc_delay_ms` 统一为 `double`（ms） |
 | 换片 | `scplayer_stop` 停旧实例；`clearDisplay` 清黑屏；避免旧帧/旧 busy 残留 |
+| 暂停+换片 | `video_refresh_loop` 先查 `quit` 再处理 `vidoe_stop`，避免 `join` 死锁（§7.2） |
+| 冷启动音频 | `warmUpAudioSession` 进播前激活 session，消首播爆破音（§7.1） |
 | 旋转 | 读流 `displaymatrix` / `rotate` → `video_rotate` → `SCRender.rotateDegrees` |
 | 网络 | `avformat_network_init`；支持 URL 播放；Info.plist 放开 ATS |
 

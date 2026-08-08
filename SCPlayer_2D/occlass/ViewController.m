@@ -780,6 +780,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    /* 进播前预热音频 session，避免冷启动首播爆破音（见 README §7） */
     [SCAudioQueuePlayer warmUpAudioSession];
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.10 alpha:1.0];
 

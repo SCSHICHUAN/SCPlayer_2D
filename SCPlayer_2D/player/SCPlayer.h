@@ -170,7 +170,7 @@ typedef struct SCPlayer{
     int out_audio_size;
     
     //音视频同步测试
-    int vidoe_stop;// 1 视频暂停,0视频播放
+    int vidoe_stop; /* 1=视频暂停(刷新线程休眠), 0=播；暂停分支也必须查 quit，见 video_refresh_loop */
 }SCPlayer;
 
 int scplayer(const char *filename, Player_call_other player_call_other, void *userData);//同步好的视频帧

@@ -27,6 +27,10 @@ static inline UInt32 sc_aq_min_u32(UInt32 a, UInt32 b) {
     AudioQueueBufferRef audioQueueBuffers[NUM_BUFFERS];
 }
 
+/*
+ 冷启动爆破音：首播时才 setActive + 拉起 AudioQueue，硬件从静音突然接 PCM 易「啪」一声。
+ 切片后再播时 session 已热，故正常。进播前调用一次即可（dispatch_once）。
+ */
 + (void)warmUpAudioSession {
     static dispatch_once_t once;
     dispatch_once(&once, ^{

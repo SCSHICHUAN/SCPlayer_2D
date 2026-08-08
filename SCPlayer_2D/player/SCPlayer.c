@@ -896,14 +896,19 @@ static void do_exit(SCPlayer *scp){
 }
 
 
+/*
+ 刷新线程主循环。
+ 坑：vidoe_stop==1 时若只 sleep/continue 而不查 quit，
+ scplayer_stop → pthread_join(本线程) 会永远等 → 暂停后再选片主线程卡死。
+ 因此每轮必须先看 quit。
+ */
 static void video_refresh_loop(SCPlayer *scp){
     for(;;){
         if (scp->quit) {
             break;
         }
         if(scp->vidoe_stop == 1){
-            /* 视频暂停：休眠；必须先查 quit，否则 stop 时 join 会死锁 */
-            sc_delay_ms(10);
+            sc_delay_ms(10); /* 视频暂停：让出 CPU，音频可继续 */
             continue;
         }
         video_refresh_timer(scp);
@@ -977,6 +982,7 @@ int scplayer(const char *filename, Player_call_other player_call_other, void *us
     return 0;
 }
 
+/* 停播/换片：置 quit、打断队列，再 join 刷新线程（该线程在暂停分支也必须响应 quit） */
 void scplayer_stop(SCPlayer *scp)
 {
     if (!scp) {

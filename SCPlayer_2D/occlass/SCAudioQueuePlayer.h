@@ -30,7 +30,7 @@ typedef int (*Audion_queue_call_other)(void *userData,
 @property (nonatomic, assign, nullable) Audion_queue_call_other audion_queue_call_other;
 @property (nonatomic, assign, nullable) void *scp_player;
 
-/// 冷启动预热 AVAudioSession，避免首播爆破音
+/// 冷启动预热 AVAudioSession（Playback + setActive）。首播才激活硬件易爆音，切片后已热则正常。
 + (void)warmUpAudioSession;
 
 /// 仅传设备参数 + 上下文，不依赖 SCPlayer 类型
