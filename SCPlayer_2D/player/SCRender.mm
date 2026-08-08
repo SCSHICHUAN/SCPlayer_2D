@@ -15,23 +15,12 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #import "Camera.h"
-//#import "Public.h"
-
-
-
-
 #import "JpegUtil.h"
 
 /* 毫秒：CACurrentMediaTime 单位是秒 */
 static inline double sc_gl_now_ms(void) {
     return CACurrentMediaTime() * 1000.0;
 }
-
-// camera
-Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
-
-
-
 
 @interface SCRender ()
 {
@@ -61,6 +50,7 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
     GLint           _msaaSamples; /* 0=关，2/4 */
     BOOL            _useMSAA;
     CAEAGLLayer     *_eaglLayer;
+    Camera camera; //c++ 对象
 }
 @end
 
@@ -96,6 +86,8 @@ Camera camera(glm::vec3(0.0f, 0.0f, 0.0f));
         _quality = SCRenderQualityBalanced;
         _msaaLevel = SCRenderMSAA4x;
         _rotateDegrees = 0;
+        // camera
+        camera.init(glm::vec3(0.0f, 0.0f, 0.0f));
         [self config];
     }
     return self;

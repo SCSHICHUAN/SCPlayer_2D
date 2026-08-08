@@ -991,6 +991,7 @@ void scplayer_stop(SCPlayer *scp)
     }
     stream_close(scp);
 }
+
 /*
  
  “.”和“->”的区别

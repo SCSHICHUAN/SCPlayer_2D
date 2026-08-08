@@ -9,10 +9,6 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #include <libavformat/avformat.h>
-
-static int decode_write_frame(AVFrame *frame);
-
-
 @interface ViewController : UIViewController
 
 @end

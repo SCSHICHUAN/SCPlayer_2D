@@ -8,13 +8,8 @@
 
 #import "SCAudioQueuePlayer.h"
 #import <AudioToolbox/AudioToolbox.h>
-#import "FFAudioInformation.h"
-#include <pthread.h>
-#include "SCPlayer.h"
-#include "SCPlayer_audio.h"
 
 #define NUM_BUFFERS 3
-#define MAX_BUFFER_COUNT 3
 /*
  最小是音频帧的大小  =  一个音频帧采样个数 x （nb_channels）音频通道数 x 位深
       4096(byte)  =   1024 x 2 x 2(byte)
@@ -22,121 +17,108 @@
  */
 #define BUFFER_SIZE (4096 * 4)
 
-
-@implementation SCAudioQueuePlayer{
-    AudioQueueRef audioQueue;
-    struct FFAudioInformation audioInformation;
-    CFMutableArrayRef buffers;
-    AVStream *stream;
-    
-    
-    AVFormatContext *formatContext;
-    dispatch_queue_t decode_dscppatch_queue;
-    dispatch_queue_t audio_play_dscppatch_queue;
-    dispatch_queue_t video_render_dscppatch_queue;
-    AVPacket *packet;
-    /// lock shared variate
-    pthread_mutex_t mutex;
-    double video_clock;
-    double tolerance_scope;
-    double audio_clock;
-    
-    AudioQueueBufferRef audioQueueBuffers[NUM_BUFFERS];
-    FILE *pcmFile;
-    SCPlayer *scp;
+static inline UInt32 sc_aq_min_u32(UInt32 a, UInt32 b) {
+    return a < b ? a : b;
 }
+
+@implementation SCAudioQueuePlayer {
+    AudioQueueRef audioQueue;
+    AudioQueueBufferRef audioQueueBuffers[NUM_BUFFERS];
+}
+
 /*
  AudioQueue 和 SDL 不一样
  AudioQueue要数据
  你自己定，最多 mAudioDataBytesCapacity
  进回调时 mAudioDataByteSize ≈ 上一盒写入、刚播完的长度
  */
-// AudioQueue回调：buffer 播完回收后再填下一帧
-void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
+static void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer) {
     if (!inUserData || !inBuffer) {
         return;
     }
 
-    SCAudioQueuePlayer *queuePlayer = (__bridge SCAudioQueuePlayer *)inUserData;//C 对象 转OC对象
-    SCPlayer *scp = queuePlayer->scp;
+    SCAudioQueuePlayer *queuePlayer = (__bridge SCAudioQueuePlayer *)inUserData;
+    Audion_queue_call_other audion_queue_call_other = queuePlayer.audion_queue_call_other;
+    void *scp_player = queuePlayer.scp_player;
 
-    if (!scp || scp->audioq.nb_packets <= 0) {
-        /* 尚无数据：填静音并重新入队，避免队列饿死（不计入 aq 水位） */
+    if (!audion_queue_call_other || !scp_player || !queuePlayer->audioQueue) {
+        return;
+    }
+
+    /* 上一盒已播完：通知业务扣水位（PCM 可能已覆盖，只传字节） */
+    if (inBuffer->mAudioDataByteSize > 0) {
+        audion_queue_call_other(scp_player, 1, (int)inBuffer->mAudioDataByteSize, NULL, NULL);
+    }
+
+    uint8_t *pcm = NULL;
+    int pcmSize = 0;
+    int ret = audion_queue_call_other(scp_player, 0, (int)inBuffer->mAudioDataBytesCapacity, &pcm, &pcmSize);
+
+    if (ret == 1 || !pcm || pcmSize <= 0) {
+        if (ret < 0) {
+            AudioQueueStop(inAQ, false);
+            NSLog(@"音频播放结束");
+            return;
+        }
+        /* 暂无数据：填静音并重新入队，避免队列饿死（不计入业务水位） */
         memset(inBuffer->mAudioData, 0, inBuffer->mAudioDataBytesCapacity);
         inBuffer->mAudioDataByteSize = inBuffer->mAudioDataBytesCapacity > 0
-            ? (UInt32)FFMIN(BUFFER_SIZE, inBuffer->mAudioDataBytesCapacity)
+            ? sc_aq_min_u32((UInt32)BUFFER_SIZE, inBuffer->mAudioDataBytesCapacity)
             : 0;
-        if (inBuffer->mAudioDataByteSize > 0 && queuePlayer->audioQueue) {
+        if (inBuffer->mAudioDataByteSize > 0) {
             AudioQueueEnqueueBuffer(queuePlayer->audioQueue, inBuffer, 0, NULL);
         }
         return;
     }
 
-    /* 上一盒已播完：水位下降（PCM 可能早已被覆盖，只扣字节账） */
-    audio_queue_consumed(scp, (int)inBuffer->mAudioDataByteSize);
-
-    //ffmpeg解码 处理下一个包
-    audio_decode_callback(scp,NULL,0);
-    int buff_size = scp->out_audio_size;// 解码后的字节数
-    if(!scp->audio_buf || buff_size <= 0) {
-        if (buff_size <= 0) {
-            AudioQueueStop(inAQ, false);
-            NSLog(@"音频播放结束");
-        }
-        return;
-    }
-
+    int buff_size = pcmSize;
     /* 保护：正常每帧 < capacity；截断仅防写越界 */
     if (buff_size > (int)inBuffer->mAudioDataBytesCapacity) {
         buff_size = (int)inBuffer->mAudioDataBytesCapacity;
     }
-    //ffmpeg中拷贝音频到iOS音频设备中
+    // 拷贝数据到音频设备
     inBuffer->mAudioDataByteSize = (UInt32)buff_size;
-    memcpy(inBuffer->mAudioData, scp->audio_buf, (UInt32)buff_size);
+    memcpy(inBuffer->mAudioData, pcm, (size_t)buff_size);
     AudioQueueEnqueueBuffer(queuePlayer->audioQueue, inBuffer, 0, NULL);
-    /* 本盒已交给硬件：cursor + 水位上升 */
-    audio_queue_wrote(scp, buff_size);
+    /* 本盒已交给硬件 */
+    audion_queue_call_other(scp_player, 2, buff_size, NULL, NULL);
 }
 
+- (void)initializeAudioQueueWithSampleRate:(double)sampleRate
+                                  channels:(int)channels
+                                  userData:(void *)userData {
+    self.scp_player = userData;
 
+    if (sampleRate <= 0 || channels <= 0) {
+        NSLog(@"AudioQueue 参数非法: rate=%f channels=%d", sampleRate, channels);
+        return;
+    }
 
+    if (audioQueue) {
+        AudioQueueStop(audioQueue, YES);
+        AudioQueueDispose(audioQueue, true);
+        audioQueue = NULL;
+    }
 
-- (void)initializeAudioQueue:(SCPlayer *)scp {
-    self->scp = scp;
-
-    /// 播放器播放时的ffmpeg采样格式
-    /// 指定了播放器在读取数据时的数据长度(一帧多少个字节)
     AudioStreamBasicDescription asbd;
-    /// 采样率
-    asbd.mSampleRate = scp->audioInfo.freq;
-    /// 音频流格式
+    asbd.mSampleRate = sampleRate;
     asbd.mFormatID = kAudioFormatLinearPCM;
-    /// 每一帧音频格式的通道数
-    asbd.mChannelsPerFrame = scp->audioInfo.channels;
-    /// 一个pacet有多少个采样帧
-    /// 一个采样帧就是一次声道数据采集
-    /// PCM这个值是1
+    asbd.mChannelsPerFrame = (UInt32)channels;
     asbd.mFramesPerPacket = 1;
-    /// 每个通道一帧占的位宽
     asbd.mBitsPerChannel = 16;
-    /// 每一帧所占的字节数
-    asbd.mBytesPerFrame = 4;
-    /// 一个packet所占的字节数
+    asbd.mBytesPerFrame = (UInt32)(channels * (asbd.mBitsPerChannel / 8));
     asbd.mBytesPerPacket = asbd.mFramesPerPacket * asbd.mBytesPerFrame;
-    /// kLinearPCMFormatFlagisSignedInteger: 存储的数据类型
-    /// kAudioFormatFlagscpPacked: 数据交叉排列
     asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     asbd.mReserved = 0;
+
     OSStatus status = AudioQueueNewOutput(&asbd,
-                                          OutputBufferCallback,//iOS音频回掉函数设置
+                                          OutputBufferCallback,
                                           (__bridge void *)(self),
                                           NULL,
                                           NULL,
                                           0, &audioQueue);
-    
     NSAssert(status == noErr, @"Initialize audioQueue Failed");
-    
-    // 创建并分配音频缓冲区
+
     for (int i = 0; i < NUM_BUFFERS; i++) {
         status = AudioQueueAllocateBuffer(audioQueue, BUFFER_SIZE, &audioQueueBuffers[i]);
         if (status != noErr) {
@@ -145,41 +127,40 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
             audioQueue = NULL;
             return;
         }
-        // 初始化填充音频数据到缓冲区
         OutputBufferCallback((__bridge void *)self, audioQueue, audioQueueBuffers[i]);
     }
-    
-    // 开始播放
+
     status = AudioQueueStart(audioQueue, NULL);
     if (status != noErr) {
         NSLog(@"启动AudioQueue失败: %d", (int)status);
         AudioQueueDispose(audioQueue, true);
         audioQueue = NULL;
-        return;
     }
 }
 
-
 - (void)play {
-    
 }
+
 - (void)stop {
     if (audioQueue) {
         AudioQueueStop(audioQueue, YES);
     }
 }
+
 - (void)pause {
     if (audioQueue) {
         AudioQueuePause(audioQueue);
     }
     NSLog(@"[音频]暂停");
 }
+
 - (void)resume {
     if (audioQueue) {
         AudioQueueStart(audioQueue, NULL);
     }
     NSLog(@"[音频]恢复");
 }
+
 - (void)cleanQueueCacheData {
     if (audioQueue) {
         AudioQueueFlush(audioQueue);
@@ -193,6 +174,5 @@ void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBuffer
         audioQueue = NULL;
     }
 }
-
 
 @end

@@ -316,6 +316,14 @@ void video_refresh_timer_tmp(void *userdata){
     
 }
 
+/* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
+static inline double sc_video_frame_ms(const SCPlayer *scp) {
+    if (scp && scp->frame_duration > 0) {
+        return scp->frame_duration;
+    }
+    return SC_DEFAULT_FRAME_DURATION_MS;
+}
+
 //刷新视频帧
 void video_refresh_timer(void *userdata){
     return video_refresh_timer_tmp(userdata);

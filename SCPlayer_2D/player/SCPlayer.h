@@ -167,14 +167,6 @@ typedef struct SCPlayer{
     int vidoe_stop;// 1 视频暂停,0视频播放
 }SCPlayer;
 
-/* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
-static inline double sc_video_frame_ms(const SCPlayer *scp) {
-    if (scp && scp->frame_duration > 0) {
-        return scp->frame_duration;
-    }
-    return SC_DEFAULT_FRAME_DURATION_MS;
-}
-
 int scplayer(const char *filename, Player_call_other player_call_other, void *userData);//同步好的视频帧
 /* 停止并释放一次播放（切换片源前调用） */
 void scplayer_stop(SCPlayer *scp);

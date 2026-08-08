@@ -51,6 +51,7 @@ static inline double av_gettime_ms(void) {
     return av_gettime() / ch_µs_to_ms;
 }
 
+
 /* 由视频流 fps 计算帧间隔(ms)；获取失败则返回默认值 */
 static inline double sc_frame_duration_from_stream(AVFormatContext *ic, AVStream *st) {
     AVRational fr;

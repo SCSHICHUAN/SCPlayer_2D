@@ -22,6 +22,7 @@
 #include "SCPlayer.h"
 #import "SCAudioQueuePlayer.h"
 #import "SCDropdownButton.h"
+#import "SCPlayer_audio.h"
 
 static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 
@@ -77,15 +78,52 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @implementation ViewController
 
 
+//音频设备要数据
+int audion_queue_call_other(void *userData, int flag, int len,
+                            uint8_t **outPCM, int *outSize) {
+    SCPlayer *scp = (SCPlayer *)userData;
+    if (!scp) {
+        return -1;
+    }
+    if (flag == 0) {
+        /* 解码取 PCM */
+        if (scp->audioq.nb_packets <= 0) {
+            return 1; /* 暂无：上层填静音 */
+        }
+        audio_decode_callback(scp, NULL, 0);//需要数据
+        if (!scp->audio_buf || scp->out_audio_size <= 0) {
+            return -1; /* 结束 */
+        }
+        if (outPCM) {
+            *outPCM = scp->audio_buf;//音频数据赋值
+        }
+        if (outSize) {
+            *outSize = scp->out_audio_size;//赋值
+        }
+        return 0;
+    }
+    if (flag == 1) {
+        audio_queue_consumed(scp, len);//已经消耗
+        return 0;
+    }
+    if (flag == 2) {
+        audio_queue_wrote(scp, len);//添入增加
+        return 0;
+    }
+    return 0;
+}
+
+//渲染设备推送视频
 int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     ViewController *vc = (__bridge ViewController *)userData;
+    SCPlayer *scp = (SCPlayer *)opaque;
+    
     if(flag == 0){
         dispatch_async(dispatch_get_main_queue(), ^{
             [vc initAudio:opaque];
         });
     }else if(flag == 1){
         /* 模块已占 display_busy；接入方只负责：释放拷贝 + 清 busy */
-        SCPlayer *scp = (SCPlayer *)opaque;
         if (!frame) {
             if (scp) {
                 scp->display_busy = 0;
@@ -119,13 +157,17 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
 -(void)initAudio:(void *)opaque{
     SCPlayer *scp = (SCPlayer *)opaque;
+    self.playingIs = scp;
     if (!scp) {
         return;
     }
     /* 不可用局部变量：initialize 后 AudioQueue 仍回调 self，局部对象会被 ARC 释放导致野指针崩溃 */
     [self.audioPlayer stop];
     self.audioPlayer = [[SCAudioQueuePlayer alloc] init];
-    [self.audioPlayer initializeAudioQueue:scp]; //初始化音频设备
+    self.audioPlayer.audion_queue_call_other = audion_queue_call_other;
+    [self.audioPlayer initializeAudioQueueWithSampleRate:scp->audioInfo.freq
+                                                channels:scp->audioInfo.channels
+                                                userData:scp];
     [self.audioPlayer play];
     self.audioPaused = NO;
     [self updateAllPauseButtonTitles];

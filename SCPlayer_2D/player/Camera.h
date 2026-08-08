@@ -81,6 +81,20 @@ public:
         Pitch = pitch;
         updateCameraVectors();
     }
+    
+    // 新增 init 成员函数
+    void init(glm::vec3 position = glm::vec3(0.0f,0.0f,0.0f),
+              glm::vec3 up       = glm::vec3(0.0f,1.0f,0.0f),
+              float yaw = YAW,
+              float pitch = PITCH)
+    {
+        Position = position;
+        WorldUp = up;
+        Yaw = yaw;
+        Pitch = pitch;
+        updateCameraVectors();
+    }
+    
     //返回使用欧拉角和LookAt矩阵计算的视图矩阵
     glm::mat4 GetViewMatrix()
     {

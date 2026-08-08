@@ -259,7 +259,47 @@ get_audio_clock ≈
 
 ---
 
-## 6. 其它相关注意
+## 6. AudioQueue 与 SCPlayer 解耦
+
+### 以前的问题
+
+`SCAudioQueuePlayer` 直接 `#include "SCPlayer.h"`，在回调里摸：
+
+- `scp->audioq` / `audio_buf` / `out_audio_size`
+- `audio_decode_callback` / `audio_queue_wrote` / `audio_queue_consumed`
+
+设备层和播放内核缠在一起：换输出设备、单测 AudioQueue、或内核改字段都要改 OC 播放器。
+
+### 现在的做法
+
+`SCAudioQueuePlayer` **只负责** AudioQueue（建队列、盒回调、memcpy、Enqueue、pause/resume）。  
+业务通过函数指针回调，由接入方（如 `ViewController`）对接 `SCPlayer`：
+
+```text
+flag 0：解码取 PCM → 出参 outPCM / outSize
+        返回 0 有数据 / 1 暂无填静音 / -1 结束停播
+flag 1：上一盒播完 → consumed(len)   （进回调时 mAudioDataByteSize 仍是上一盒）
+flag 2：本盒已 Enqueue → wrote(len)
+
+初始化：只传 sampleRate / channels / userData，不传 SCPlayer 类型
+```
+
+### 解耦的好处
+
+| 好处 | 说明 |
+|------|------|
+| 职责清晰 | Queue = 设备与缓冲；SCPlayer = 解码与时钟水位；VC = 粘合 |
+| 编译隔离 | `SCAudioQueuePlayer` 不再依赖 `SCPlayer.h` / FFmpeg 头，改内核字段不必重编设备层语义 |
+| 可替换 | 同一套回调可接别的 PCM 源，或把 AudioQueue 换成其他输出，内核不动 |
+| 可测 | 可用假回调喂静音/固定 PCM，单独验证 Enqueue / pause，不必拉起整条解复用 |
+| 与视频侧对称 | 视频已是 `frame_call_bacl` 送显；音频同样「模块回调、接入方实现」，边界一致 |
+| 水位仍在内核 | `wrote` / `consumed` 留在 `SCPlayer_audio`，时钟公式不泄漏进 OC |
+
+注意：初始化前必须先设好回调；`initialize` 会立刻预填若干 buffer 并触发回调。
+
+---
+
+## 7. 其它相关注意
 
 - **休眠字段**：`delay_video_time` 与 `sc_delay_ms` 统一用 `double`（ms），只在 `usleep` 边界转微秒；避免 `uint32_t` 把负 delay 转成天文数字
 - **送显所有权**：clone 后出队；回调里 `av_frame_free`，不要再次 `fream_queue_pop`
@@ -276,11 +316,11 @@ SCPlayer_2D/
   libs/       # FFmpeg 等
 ```
 
-入口：`scplayer()`；视频帧通过 `frame_call_bacl` 交给上层渲染。
+入口：`scplayer()`；视频帧通过 `frame_call_bacl` 交给上层渲染；音频设备通过 `Audion_queue_call_other` 向接入方要 PCM。
 
 ---
 
-## 7. 近期开发改动总结
+## 8. 近期开发改动总结
 
 ### 播放核心
 
@@ -288,6 +328,7 @@ SCPlayer_2D/
 |----|------|
 | 送显解耦 | 去掉 `frame_display_pending`；`video_display` 里 `av_frame_clone` 后立刻出队，回调只 `av_frame_free` |
 | `display_busy` | 放在 `VideoState`，只决定是否送 GL，**不参与** delay / 同步计算；忙则出队丢显 |
+| 音频设备解耦 | `SCAudioQueuePlayer` 不依赖 `SCPlayer`；经 `Audion_queue_call_other` 取 PCM / wrote / consumed |
 | 同步 | 对齐 ffplay：`sync_threshold` 夹 delay，落后 `delay+diff`，超前长帧补 diff、短帧 `2*delay` |
 | 休眠 | `delay_video_time` 与 `sc_delay_ms` 统一为 `double`（ms） |
 | 换片 | `scplayer_stop` 停旧实例；`clearDisplay` 清黑屏；避免旧帧/旧 busy 残留 |
