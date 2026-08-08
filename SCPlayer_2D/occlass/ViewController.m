@@ -776,8 +776,11 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
     self.lab.text = @"已取消选择";
 }
 
+
+
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [SCAudioQueuePlayer warmUpAudioSession];
     self.view.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.10 alpha:1.0];
 
     [self.view insertSubview:self.cRender atIndex:0];

@@ -7,6 +7,7 @@
 //
 
 #import "SCAudioQueuePlayer.h"
+#import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 
 #define NUM_BUFFERS 3
@@ -24,6 +25,16 @@ static inline UInt32 sc_aq_min_u32(UInt32 a, UInt32 b) {
 @implementation SCAudioQueuePlayer {
     AudioQueueRef audioQueue;
     AudioQueueBufferRef audioQueueBuffers[NUM_BUFFERS];
+}
+
++ (void)warmUpAudioSession {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSError *err = nil;
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        [session setCategory:AVAudioSessionCategoryPlayback error:&err];
+        [session setActive:YES error:&err];
+    });
 }
 
 /*
