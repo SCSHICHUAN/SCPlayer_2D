@@ -727,14 +727,14 @@ void *read_thread(void *arg){
         }
         
         //没有消费完循环等待10ms，queue满了
-        if(scp->audioq.size > MAX_QUEUE_SIZE ){
+        if(scp->audioq.size > MAX_QUEUE_AUDIO_SIZE ){
             sc_delay_ms(10);
             continue;
         }
-//        if(scp->videoq.size > MAX_QUEUE_SIZE){
-//            sc_delay_ms(10);
-//            continue;
-//        }
+        if(scp->videoq.size > MAX_QUEUE_VIDEO_SIZE){
+            sc_delay_ms(10);
+            continue;
+        }
         //从上下文中读取包
         ret = av_read_frame(scp->ic,pkt);
         if(ret < 0){

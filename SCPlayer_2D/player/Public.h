@@ -14,7 +14,8 @@
 #define FF_REFRESH_EVENT (100)
 #define FF_QUIT_EVENT (100 + 1)
 
-#define MAX_QUEUE_SIZE (5 * 1024 * 1024)
+#define MAX_QUEUE_AUDIO_SIZE (100 * 1024 * 1024)  //100MB
+#define MAX_QUEUE_VIDEO_SIZE (300 * 1024 * 1024)  //300MB
 #define AUDIO_BUFFER_SIZE 1024
 /*
  工程内媒体时间、同步时钟统一为毫秒 (ms)
