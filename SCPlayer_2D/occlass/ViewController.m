@@ -42,6 +42,8 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @property(nonatomic,strong)UIButton *videoPauseBtn;
 @property(nonatomic,strong)UIButton *audioPauseBtn;
 @property(nonatomic,strong)UIButton *avPauseBtn;
+@property(nonatomic,strong)UIButton *rotateBtn;
+@property(nonatomic,assign)int userRotateDegrees; /* 0=竖屏显示，90=横屏显示（叠加流元数据旋转） */
 @property(nonatomic,assign)BOOL audioPaused;
 @property(nonatomic,strong)UIView *controlsBar;
 @property(nonatomic,assign)BOOL controlsVisible;
@@ -55,6 +57,9 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 -(void)stopCurrentPlayback;
 -(void)toggleRenderMode;
 -(void)updateModeButtonTitle;
+-(void)toggleOrientRotate;
+-(void)updateRotateButtonTitle;
+-(void)applyCombinedRotate;
 -(void)toggleVideoPause;
 -(void)updateVideoPauseButtonTitle;
 -(void)toggleAudioPause;
@@ -144,7 +149,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             return 0;
         }
         vc.playingIs = scp;
-        vc.cRender.rotateDegrees = scp->video_rotate;
+        /* 流元数据旋转 + 用户横/竖屏偏好，避免每帧覆盖手动旋转 */
+        int deg = (scp->video_rotate + vc.userRotateDegrees) % 360;
+        if (deg < 0) deg += 360;
+        vc.cRender.rotateDegrees = deg;
         double diffMs = scp->delay_video_time;
         double videoMB = scp->videoq.size / (1024.0 * 1024.0);
         double audioMB = scp->audioq.size / (1024.0 * 1024.0);
@@ -196,6 +204,8 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.cRender.rotateDegrees = 0;
     [self.cRender clearDisplay];
     [self updateAllPauseButtonTitles];
+    /* 停播后恢复系统自动锁屏 */
+    [UIApplication sharedApplication].idleTimerDisabled = NO;
     if (scp) {
         scp->display_busy = 0;
         scplayer_stop(scp);
@@ -245,6 +255,9 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         [self.view sendSubviewToBack:self.cRender];
     }
     [self.view bringSubviewToFront:self.controlsBar];
+
+    /* 播放期间保持屏幕常亮 */
+    [UIApplication sharedApplication].idleTimerDisabled = YES;
     
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
@@ -252,12 +265,17 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         if (!strongSelf) {
             return;
         }
-        int ret = scplayer([path UTF8String], when_frame_push, (__bridge void *)strongSelf);
-        if (ret != 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *pathCopy = path;
+        int ret = scplayer([pathCopy UTF8String], when_frame_push, (__bridge void *)strongSelf);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (ret != 0) {
                 strongSelf.lab.text = @"打开失败，请检查路径或 URL";
-            });
-        }
+            }
+            /* 本路播放结束且没有换到别的片源时，恢复自动锁屏 */
+            if ([strongSelf.playingPath isEqualToString:pathCopy]) {
+                [UIApplication sharedApplication].idleTimerDisabled = NO;
+            }
+        });
     });
 }
 
@@ -289,6 +307,27 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         ? @"等比例"
         : @"拉伸铺满";
     [self.modeBtn setTitle:title forState:UIControlStateNormal];
+}
+
+-(void)applyCombinedRotate{
+    int base = self.playingIs ? self.playingIs->video_rotate : 0;
+    int deg = (base + self.userRotateDegrees) % 360;
+    if (deg < 0) deg += 360;
+    self.cRender.rotateDegrees = deg;
+}
+
+-(void)toggleOrientRotate{
+    /* 竖屏(0) ↔ 横屏(90) */
+    self.userRotateDegrees = (self.userRotateDegrees == 0) ? 90 : 0;
+    [self applyCombinedRotate];
+    [self updateRotateButtonTitle];
+    self.lab.text = (self.userRotateDegrees == 0) ? @"画面: 竖屏" : @"画面: 横屏";
+}
+
+-(void)updateRotateButtonTitle{
+    /* 按钮显示当前可切换到的目标方向 */
+    NSString *title = (self.userRotateDegrees == 0) ? @"横屏" : @"竖屏";
+    [self.rotateBtn setTitle:title forState:UIControlStateNormal];
 }
 
 -(void)toggleVideoPause{
@@ -564,11 +603,18 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     UIButton *avPauseBtn = [self makeButton:@"暂停" action:@selector(toggleAVPause)];
     self.avPauseBtn = avPauseBtn;
 
+    UIButton *rotateBtn = [self makeButton:@"横屏" action:@selector(toggleOrientRotate)];
+    self.rotateBtn = rotateBtn;
+    CGFloat rotateW = MAX([self fittingWidthForButtonTitle:@"横屏"],
+                          [self fittingWidthForButtonTitle:@"竖屏"]);
+    [rotateBtn.widthAnchor constraintEqualToConstant:rotateW].active = YES;
+
     [bar addSubview:urlField];
     [bar addSubview:urlPlayBtn];
     [bar addSubview:videoPauseBtn];
     [bar addSubview:audioPauseBtn];
     [bar addSubview:avPauseBtn];
+    [bar addSubview:rotateBtn];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -588,16 +634,22 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
                             top:lab.bottomAnchor
                     topConstant:8];
 
-    /* 第3行：抗锯齿 / V / A / 同步暂停 —— 按文字宽度，最多 4 */
-    [self layoutEqualWidthViews:@[msaaDrop, videoPauseBtn, audioPauseBtn, avPauseBtn]
+    /* 第3行：抗锯齿 / 横竖屏 / V / A —— 按文字宽度，最多 4 */
+    [self layoutEqualWidthViews:@[msaaDrop, rotateBtn, videoPauseBtn, audioPauseBtn]
                           inBar:bar
                             top:startBtn.bottomAnchor
                     topConstant:8];
 
-    /* 第4行：URL + 播放 */
+    /* 第4行：同步暂停 */
+    [self layoutEqualWidthViews:@[avPauseBtn]
+                          inBar:bar
+                            top:msaaDrop.bottomAnchor
+                    topConstant:8];
+
+    /* 第5行：URL + 播放 */
     [NSLayoutConstraint activateConstraints:@[
         [urlField.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:10],
-        [urlField.topAnchor constraintEqualToAnchor:msaaDrop.bottomAnchor constant:8],
+        [urlField.topAnchor constraintEqualToAnchor:avPauseBtn.bottomAnchor constant:8],
         [urlField.heightAnchor constraintEqualToConstant:36],
         [urlField.bottomAnchor constraintEqualToAnchor:bar.bottomAnchor constant:-10],
 
@@ -611,7 +663,9 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.controlsVisible = YES;
     self.cRender.quality = SCRenderQualityBalanced;
     self.cRender.msaaLevel = SCRenderMSAA4x;
+    self.userRotateDegrees = 0;
     [self updateModeButtonTitle];
+    [self updateRotateButtonTitle];
     [self updateAllPauseButtonTitles];
     [self buildDiffTextView];
 }
@@ -873,6 +927,13 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     self.cRender.frame = self.view.bounds;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    if (self.isMovingFromParentViewController || self.isBeingDismissed) {
+        [UIApplication sharedApplication].idleTimerDisabled = NO;
+    }
 }
 
 -(SCRender *)cRender{
