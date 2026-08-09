@@ -50,11 +50,14 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @property(nonatomic,assign)SCPlayer *playingIs;
 @property(nonatomic,strong)UITextView *diffTextView;
 @property(nonatomic,strong)NSMutableArray<NSString *> *diffLines;
+@property(nonatomic,strong)NSTimer *keepAwakeTimer;
 -(void)initAudio:(void *)opaque;
 -(void)startPlayWithPath:(NSString *)path;
 -(void)playURLFromField;
 -(BOOL)isNetworkURL:(NSString *)s;
 -(void)stopCurrentPlayback;
+-(void)setScreenKeepAwake:(BOOL)on;
+-(void)keepAwakeTimerFired;
 -(void)toggleRenderMode;
 -(void)updateModeButtonTitle;
 -(void)toggleOrientRotate;
@@ -131,6 +134,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     
     if(flag == 0){
         dispatch_async(dispatch_get_main_queue(), ^{
+            [vc setScreenKeepAwake:YES];
             [vc initAudio:opaque];
         });
     }else if(flag == 1){
@@ -195,6 +199,38 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self updateAllPauseButtonTitles];
 }
 
+
+-(void)setScreenKeepAwake:(BOOL)on{
+    dispatch_block_t apply = ^{
+        [UIApplication sharedApplication].idleTimerDisabled = on;
+        if (on) {
+            if (!self.keepAwakeTimer) {
+                /* 系统偶发清掉 idleTimerDisabled，定时重新打开 */
+                self.keepAwakeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                                       target:self
+                                                                     selector:@selector(keepAwakeTimerFired)
+                                                                     userInfo:nil
+                                                                      repeats:YES];
+                [[NSRunLoop mainRunLoop] addTimer:self.keepAwakeTimer forMode:NSRunLoopCommonModes];
+            }
+        } else {
+            [self.keepAwakeTimer invalidate];
+            self.keepAwakeTimer = nil;
+        }
+    };
+    if ([NSThread isMainThread]) {
+        apply();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), apply);
+    }
+}
+
+-(void)keepAwakeTimerFired{
+    if (self.playingPath.length > 0) {
+        [UIApplication sharedApplication].idleTimerDisabled = YES;
+    }
+}
+
 -(void)stopCurrentPlayback{
     SCPlayer *scp = self.playingIs;
     self.playingIs = NULL;
@@ -205,7 +241,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self.cRender clearDisplay];
     [self updateAllPauseButtonTitles];
     /* 停播后恢复系统自动锁屏 */
-    [UIApplication sharedApplication].idleTimerDisabled = NO;
+    [self setScreenKeepAwake:NO];
     if (scp) {
         scp->display_busy = 0;
         scplayer_stop(scp);
@@ -257,7 +293,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self.view bringSubviewToFront:self.controlsBar];
 
     /* 播放期间保持屏幕常亮 */
-    [UIApplication sharedApplication].idleTimerDisabled = YES;
+    [self setScreenKeepAwake:YES];
     
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
@@ -271,9 +307,9 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
             if (ret != 0) {
                 strongSelf.lab.text = @"打开失败，请检查路径或 URL";
             }
-            /* 本路播放结束且没有换到别的片源时，恢复自动锁屏 */
+            /* 本路播放线程结束，且当前仍是这一路时，恢复自动锁屏 */
             if ([strongSelf.playingPath isEqualToString:pathCopy]) {
-                [UIApplication sharedApplication].idleTimerDisabled = NO;
+                [strongSelf setScreenKeepAwake:NO];
             }
         });
     });
@@ -932,7 +968,14 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     if (self.isMovingFromParentViewController || self.isBeingDismissed) {
-        [UIApplication sharedApplication].idleTimerDisabled = NO;
+        [self setScreenKeepAwake:NO];
+    }
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (self.playingPath.length > 0) {
+        [self setScreenKeepAwake:YES];
     }
 }
 

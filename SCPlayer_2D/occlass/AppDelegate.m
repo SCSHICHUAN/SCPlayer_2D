@@ -39,7 +39,17 @@
 
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
-    // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+    UIViewController *vc = application.keyWindow.rootViewController;
+    while (vc.presentedViewController) {
+        vc = vc.presentedViewController;
+    }
+    @try {
+        id path = [vc valueForKey:@"playingPath"];
+        if ([path isKindOfClass:[NSString class]] && [path length] > 0) {
+            application.idleTimerDisabled = YES;
+        }
+    } @catch (__unused NSException *e) {
+    }
 }
 
 
