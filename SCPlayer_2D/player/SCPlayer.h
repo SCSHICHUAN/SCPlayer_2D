@@ -106,6 +106,7 @@ typedef struct SCPlayer{
     //音视频同步相关
     int av_sync_type;
 
+    double          audio_ref_clock;  // 音频播放到的时间点
     double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
     double          audio_write_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
     double          audio_lin_wall_ms;// 上次 wrote 时的墙钟（ms）

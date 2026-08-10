@@ -306,13 +306,14 @@ void video_refresh_timer_tmp(void *userdata){
             //下一帧视频播放时间
             vp = frame_queue_peek(&scp->pictq);//读起视频帧
             ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
+            scp->audio_ref_clock = ref_clock;
             diff = vp->pts - ref_clock;
             scp->delay_video_time = diff;
             if(diff <= 0){
                 diff = 0;
             }
             video_dscpplay(scp);
-            printf("diff = %.2f ms \n",diff);
+//            printf("diff = %.2f ms \n",diff);
         }
     } else {
         scp->delay_video_time = 100;//等待打开视频流
@@ -372,6 +373,7 @@ void video_refresh_timer(void *userdata){
             if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
                 ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
                 diff = vp->pts - ref_clock;//将要播放的视频帧 - 播放到的音频时刻 (正常情况下将要播放的视频帧要等diff才可以播放)
+                scp->audio_ref_clock = ref_clock;
             }
             
             /* Skip or repeat the frame. Take delay into account

@@ -746,6 +746,8 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     NSString *line = [NSString stringWithFormat:
                       @"diff:%.1fms display:%.1fms video:%.2fMB audio:%.2fMB",
                       diffMs, displayMs, videoMB, audioMB];
+    av_log(NULL, AV_LOG_INFO, "diff:%.1fms display:%.1fms video:%.2fMB audio:%.2fMB time:%.0fms\n",
+           diffMs, displayMs, videoMB, audioMB,self.playingIs->audio_ref_clock);
     [self.diffLines addObject:line];
     while (self.diffLines.count > 100) {
         [self.diffLines removeObjectAtIndex:0];
