@@ -604,6 +604,7 @@ int stream_component_open(SCPlayer *scp,int stream_index){
                 av_log(NULL,AV_LOG_ERROR,"不能打开音频设备!\n");
                 // goto __ERROR;
             }
+            scp->audio_ref_clock = 0;
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
             scp->audio_clock = NAN;
