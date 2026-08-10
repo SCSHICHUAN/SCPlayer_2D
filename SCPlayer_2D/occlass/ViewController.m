@@ -78,7 +78,7 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 -(CGFloat)fittingWidthForButtonTitle:(NSString *)title;
 -(void)buildControls;
 -(void)buildDiffTextView;
--(void)appendDiffLog:(double)diffMs displayMs:(double)displayMs
+-(void)appendDiffLog:(double)diffMs renderMS:(double)renderMS
              videoMB:(double)videoMB audioMB:(double)audioMB;
 -(void)clearDiffLog;
 -(void)toggleControlsVisibility;
@@ -162,10 +162,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         double audioMB = scp->audioq.size / (1024.0 * 1024.0);
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
-            double displayMs = vc.cRender.lastDisplayMs;
+            double renderMS = vc.cRender.lastrenderMS;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (vc.playingIs == scp) {
-                    [vc appendDiffLog:diffMs displayMs:displayMs videoMB:videoMB audioMB:audioMB];
+                    [vc appendDiffLog:diffMs renderMS:renderMS videoMB:videoMB audioMB:audioMB];
                 }
             });
             AVFrame *owned = frame;
@@ -734,7 +734,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     ]];
 }
 
--(void)appendDiffLog:(double)diffMs displayMs:(double)displayMs
+-(void)appendDiffLog:(double)diffMs renderMS:(double)renderMS
              videoMB:(double)videoMB audioMB:(double)audioMB{
     if (!self.diffTextView) {
         return;
@@ -744,10 +744,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     }
     /* 精简一行：同步差 | 渲染耗时 | 音视频包缓存 */
     NSString *line = [NSString stringWithFormat:
-                      @"diff:%.1fms display:%.1fms video:%.2fMB audio:%.2fMB",
-                      diffMs, displayMs, videoMB, audioMB];
-    av_log(NULL, AV_LOG_INFO, "diff:%.1fms display:%.1fms video:%.2fMB audio:%.2fMB time:%.0fms\n",
-           diffMs, displayMs, videoMB, audioMB,self.playingIs->audio_ref_clock);
+                      @"diff:%.1fms render:%.1fms video:%.2fMB audio:%.2fMB",
+                      diffMs, renderMS, videoMB, audioMB];
+    av_log(NULL, AV_LOG_INFO, "diff:%.1fms render:%.1fms video:%.2fMB audio:%.2fMB time:%.0fms\n",
+           diffMs, renderMS, videoMB, audioMB,self.playingIs->audio_ref_clock);
     [self.diffLines addObject:line];
     while (self.diffLines.count > 100) {
         [self.diffLines removeObjectAtIndex:0];

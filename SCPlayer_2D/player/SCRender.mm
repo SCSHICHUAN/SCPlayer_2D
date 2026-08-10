@@ -523,7 +523,7 @@ glm::mat4 view = glm::mat4(1.0f);
         double t_p1 = sc_gl_now_ms();
         
         (void)t_c1; (void)t_u1; (void)t_d0; (void)t_d1; (void)t_p0;
-        self.lastDisplayMs = t_p1 - t0; /* GL 总耗时 → 日志 display */
+        self.lastrenderMS = t_p1 - t0; /* GL 总耗时 → 日志 display */
         if (completionBlock) completionBlock(YES);
     });
 }

@@ -40,7 +40,7 @@ typedef NS_ENUM(NSInteger, SCRenderMSAALevel) {
 @property(nonatomic,assign) SCRenderQuality quality;
 @property(nonatomic,assign) SCRenderMSAALevel msaaLevel;
 @property(nonatomic,assign) int rotateDegrees; /* 0/90/180/270，流元数据旋转纠正 */
-@property(nonatomic,assign) double lastDisplayMs; /* 最近一帧 GL 总耗时（ms） */
+@property(nonatomic,assign) double lastrenderMS; /* 最近一帧 GL 总耗时（ms） */
 @property(nonatomic,assign)float testD;
 @property(nonatomic,assign)float forward;
 @property(nonatomic,assign)float back;
