@@ -373,18 +373,33 @@ glm::mat4 view = glm::mat4(1.0f);
          AVFrame->width：表示视频的有效像素宽度（实际显示的宽度）。自己用就会花屏
          AVFrame->linesize[0]：表示 Y 分量在内存中的实际存储宽度（包含对齐填充的无效数据）。
          */
-        // 获取各分量实际行间距
-        int yStride = yuvFrame->linesize[0];
-        int uStride = yuvFrame->linesize[1];
-        int vStride = yuvFrame->linesize[2];
-        
+        /*
+         【绿边修复】若按 linesize 整行当纹理宽上传，U/V 对齐常与 Y 不同，右边会采到填充（典型绿边）。
+         用 GL_UNPACK_ROW_LENGTH 只上传有效宽（width / width/2），纹理坐标 0~1，videoToRenderRatio=1.0。
+         */
+        // 获取各分量实际行间距（取 abs，兼容负 linesize）
+        int yStride = abs(yuvFrame->linesize[0]);
+        int uStride = abs(yuvFrame->linesize[1]);
+        int vStride = abs(yuvFrame->linesize[2]);
+        if (yStride <= 0 || uStride <= 0 || vStride <= 0 ||
+            !yuvFrame->data[0] || !yuvFrame->data[1] || !yuvFrame->data[2]) {
+            if (completionBlock) completionBlock(NO);
+            return;
+        }
+
         // 计算UV分量尺寸
         int uvWidth = videoWidth / 2;
         int uvHeight = videoHeight / 2;
-        
+        if (uvWidth <= 0 || uvHeight <= 0) {
+            if (completionBlock) completionBlock(NO);
+            return;
+        }
+
         // 关键：计算宽向校正因子（有效宽度 / 实际行间距）
         float yScaleX = (float)videoWidth / yStride;    // Y分量水平校正
         float uvScaleX = (float)uvWidth / uStride;      // U/V分量水平校正
+        /* 【绿边修复】旧：纹理宽=stride 且只用 yScaleX；现 UNPACK 有效宽后改为 1.0，见下方 uniform */
+        (void)yScaleX;
         (void)uvScaleX;
         
         glBindFramebuffer(GL_FRAMEBUFFER, self->_frameBuffer);
@@ -415,15 +430,18 @@ glm::mat4 view = glm::mat4(1.0f);
         }
         double t_c1 = sc_gl_now_ms();
         
-        // 绑定Y纹理
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+        // 绑定Y纹理（纹理宽=有效宽，跳过行尾对齐填充）
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, self->_yTexture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, yStride);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     yStride, videoHeight, 0,
+                     videoWidth, videoHeight, 0,
                      GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[0]);
         glUniform1i(glGetUniformLocation(self->_glProgram, "yTexture"), 0);
         
@@ -434,8 +452,9 @@ glm::mat4 view = glm::mat4(1.0f);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, uStride);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     uStride, uvHeight, 0,
+                     uvWidth, uvHeight, 0,
                      GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[1]);
         glUniform1i(glGetUniformLocation(self->_glProgram, "uTexture"), 1);
         
@@ -446,10 +465,12 @@ glm::mat4 view = glm::mat4(1.0f);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, vStride);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     vStride, uvHeight, 0,
+                     uvWidth, uvHeight, 0,
                      GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[2]);
         glUniform1i(glGetUniformLocation(self->_glProgram, "vTexture"), 2);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         {
             GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
             glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, GL_TIMEOUT_IGNORED);
@@ -474,7 +495,8 @@ glm::mat4 view = glm::mat4(1.0f);
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "view"), 1, GL_FALSE, &view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(self->_glProgram, "model"), 1, GL_FALSE, &model[0][0]);
         
-        float videoToRenderRatio = yScaleX;
+        /* videoToRenderRatio：传给顶点着色器，裁掉纹理右侧 linesize 填充；现已 UNPACK 有效宽，固定 1.0 */
+        float videoToRenderRatio = 1.0f; /* 旧：= yScaleX */
         glUniform1f(glGetUniformLocation(self->_glProgram, "videoToRenderRatio"), videoToRenderRatio);
         
         /* 显示模式：等比例 letterbox / 拉伸铺满（90/270 交换宽高算比例） */
