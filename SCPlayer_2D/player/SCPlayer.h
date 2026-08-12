@@ -35,7 +35,9 @@ enum {
   AV_SYNC_EXTERNAL_MASTER,
 };
 
-static int av_sync_type = AV_SYNC_EXTERNAL_MASTER;
+extern int sc_av_sync_type;
+void sc_set_av_sync_type(int type);
+int sc_get_av_sync_type(void);
 
 
 

@@ -25,6 +25,42 @@
 #import "SCPlayer_audio.h"
 
 static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
+static NSString * const kSCMSAALevelKey = @"SCPlayer.msaaLevel";
+
+/* 读用户抗锯齿偏好；无记录则默认关 */
+static SCRenderMSAALevel SCLoadMSAALevel(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if ([ud objectForKey:kSCMSAALevelKey] == nil) {
+        return SCRenderMSAAOff;
+    }
+    NSInteger v = [ud integerForKey:kSCMSAALevelKey];
+    if (v < SCRenderMSAAOff || v > SCRenderMSAA8x) {
+        return SCRenderMSAAOff;
+    }
+    return (SCRenderMSAALevel)v;
+}
+
+static void SCSaveMSAALevel(SCRenderMSAALevel level) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setInteger:level forKey:kSCMSAALevelKey];
+    [ud synchronize];
+}
+
+static NSString * const kSCLatencyModeKey = @"SCPlayer.latencyMode";
+/* 0=低延时(EXTERNAL) 1=高延时(AUDIO)；默认低延时 */
+static BOOL SCLoadHighLatency(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if ([ud objectForKey:kSCLatencyModeKey] == nil) return NO;
+    return [ud integerForKey:kSCLatencyModeKey] != 0;
+}
+static void SCSaveHighLatency(BOOL high) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setInteger:high ? 1 : 0 forKey:kSCLatencyModeKey];
+    [ud synchronize];
+}
+static void SCApplyLatencyMode(BOOL high) {
+    sc_set_av_sync_type(high ? AV_SYNC_AUDIO_MASTER : AV_SYNC_EXTERNAL_MASTER);
+}
 
 @interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate>
 @property(nonatomic,assign)BOOL end;
@@ -43,6 +79,8 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 @property(nonatomic,strong)UIButton *audioPauseBtn;
 @property(nonatomic,strong)UIButton *avPauseBtn;
 @property(nonatomic,strong)UIButton *rotateBtn;
+@property(nonatomic,strong)UIButton *latencyBtn;
+@property(nonatomic,assign)BOOL highLatencyMode;
 @property(nonatomic,assign)int userRotateDegrees; /* 0=竖屏显示，90=横屏显示（叠加流元数据旋转） */
 @property(nonatomic,assign)BOOL audioPaused;
 @property(nonatomic,strong)UIView *controlsBar;
@@ -60,6 +98,8 @@ static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 -(void)keepAwakeTimerFired;
 -(void)toggleRenderMode;
 -(void)updateModeButtonTitle;
+-(void)toggleLatencyMode;
+-(void)updateLatencyButtonTitle;
 -(void)toggleOrientRotate;
 -(void)updateRotateButtonTitle;
 -(void)applyCombinedRotate;
@@ -342,6 +382,21 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self updateModeButtonTitle];
 }
 
+-(void)toggleLatencyMode{
+    self.highLatencyMode = !self.highLatencyMode;
+    SCSaveHighLatency(self.highLatencyMode);
+    SCApplyLatencyMode(self.highLatencyMode);
+    if (self.playingIs) {
+        self.playingIs->av_sync_type = sc_get_av_sync_type();
+    }
+    [self updateLatencyButtonTitle];
+    self.lab.text = self.highLatencyMode ? @"延时: 高延时" : @"延时: 低延时";
+}
+-(void)updateLatencyButtonTitle{
+    NSString *title = self.highLatencyMode ? @"高延时" : @"低延时";
+    [self.latencyBtn setTitle:title forState:UIControlStateNormal];
+}
+
 -(void)updateModeButtonTitle{
     NSString *title = (self.cRender.fillMode == SCRenderFillModeAspectFit)
         ? @"等比例"
@@ -561,16 +616,18 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     };
     self.qualityDropdown = qualityDrop;
 
+    SCRenderMSAALevel savedMSAA = SCLoadMSAALevel();
     SCDropdownButton *msaaDrop =
         [[SCDropdownButton alloc] initWithPrefix:@"抗锯齿"
                                          options:@[@"关", @"2x", @"4x", @"8x"]
-                                   selectedIndex:SCRenderMSAA4x];
+                                   selectedIndex:savedMSAA];
     msaaDrop.panelAlignment = SCDropdownPanelAlignmentLeading;
     msaaDrop.selectionHandler = ^(NSInteger index, NSString *title) {
         (void)title;
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         strongSelf.cRender.msaaLevel = (SCRenderMSAALevel)index;
+        SCSaveMSAALevel((SCRenderMSAALevel)index);
         strongSelf.lab.text = [NSString stringWithFormat:@"抗锯齿: %@", title];
     };
     self.msaaDropdown = msaaDrop;
@@ -649,12 +706,19 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
                           [self fittingWidthForButtonTitle:@"竖屏"]);
     [rotateBtn.widthAnchor constraintEqualToConstant:rotateW].active = YES;
 
+    UIButton *latencyBtn = [self makeButton:@"低延时" action:@selector(toggleLatencyMode)];
+    self.latencyBtn = latencyBtn;
+    CGFloat latencyW = MAX([self fittingWidthForButtonTitle:@"低延时"],
+                           [self fittingWidthForButtonTitle:@"高延时"]);
+    [latencyBtn.widthAnchor constraintEqualToConstant:latencyW].active = YES;
+
     [bar addSubview:urlField];
     [bar addSubview:urlPlayBtn];
     [bar addSubview:videoPauseBtn];
     [bar addSubview:audioPauseBtn];
     [bar addSubview:avPauseBtn];
     [bar addSubview:rotateBtn];
+    [bar addSubview:latencyBtn];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -680,8 +744,8 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
                             top:startBtn.bottomAnchor
                     topConstant:8];
 
-    /* 第4行：同步暂停 */
-    [self layoutEqualWidthViews:@[avPauseBtn]
+    /* 第4行：延时 / 同步暂停 */
+    [self layoutEqualWidthViews:@[latencyBtn, avPauseBtn]
                           inBar:bar
                             top:msaaDrop.bottomAnchor
                     topConstant:8];
@@ -702,10 +766,13 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
 
     self.controlsVisible = YES;
     self.cRender.quality = SCRenderQualityBalanced;
-    self.cRender.msaaLevel = SCRenderMSAA4x;
+    self.cRender.msaaLevel = SCLoadMSAALevel();
     self.userRotateDegrees = 0;
+    self.highLatencyMode = SCLoadHighLatency();
+    SCApplyLatencyMode(self.highLatencyMode);
     [self updateModeButtonTitle];
     [self updateRotateButtonTitle];
+    [self updateLatencyButtonTitle];
     [self updateAllPauseButtonTitles];
     [self buildDiffTextView];
 }

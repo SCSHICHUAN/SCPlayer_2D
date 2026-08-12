@@ -84,7 +84,7 @@ static inline double sc_gl_now_ms(void) {
     if(self){
         _fillMode = SCRenderFillModeAspectFit;
         _quality = SCRenderQualityBalanced;
-        _msaaLevel = SCRenderMSAA4x;
+        _msaaLevel = SCRenderMSAAOff;
         _rotateDegrees = 0;
         // camera
         camera.init(glm::vec3(0.0f, 0.0f, 0.0f));

@@ -45,6 +45,21 @@ __attribute__((used)) static const void *const sc_force_link_atempo[] = {
     &ff_af_atempo,
 };
 
+int sc_av_sync_type = AV_SYNC_EXTERNAL_MASTER;
+
+void sc_set_av_sync_type(int type) {
+    if (type != AV_SYNC_AUDIO_MASTER &&
+        type != AV_SYNC_VIDEO_MASTER &&
+        type != AV_SYNC_EXTERNAL_MASTER) {
+        type = AV_SYNC_EXTERNAL_MASTER;
+    }
+    sc_av_sync_type = type;
+}
+
+int sc_get_av_sync_type(void) {
+    return sc_av_sync_type;
+}
+
 /*
  一.main 主线程中 --------线程 1 主线程
  1.判断url的合法性
@@ -882,7 +897,7 @@ static SCPlayer *stream_open(const char* filename){
         goto __ERROR;
     }
     
-    scp->av_sync_type = av_sync_type;
+    scp->av_sync_type = sc_av_sync_type;
     scp->realtime = 0;
     sc_ext_clock_init(scp);
     if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
