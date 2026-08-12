@@ -38,6 +38,13 @@ __attribute__((used)) static const void *const sc_force_link_videotoolbox[] = {
     &ff_mpeg2_videotoolbox_hwaccel,
 };
 
+/* 静态链 libavfilter 时拉住 atempo（变速不变调） */
+#include <libavfilter/avfilter.h>
+extern const AVFilter ff_af_atempo;
+__attribute__((used)) static const void *const sc_force_link_atempo[] = {
+    &ff_af_atempo,
+};
+
 /*
  一.main 主线程中 --------线程 1 主线程
  1.判断url的合法性

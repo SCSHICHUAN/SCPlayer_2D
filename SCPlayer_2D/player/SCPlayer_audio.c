@@ -9,8 +9,14 @@
 #include "SCPlayer_audio.h"
 #include "SCPlayer_sync.h"
 #include <math.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersrc.h>
+#include <libavfilter/buffersink.h>
+#include <libavutil/opt.h>
 
 #define SC_SAMPLE_CORRECTION_PERCENT_MAX 10
+
+static void sc_atempo_close(SCPlayer *scp);
 
 static int audio_bytes_per_sec(SCPlayer *scp)
 {
@@ -75,6 +81,7 @@ void audio_aq_interp_stop(SCPlayer *scp)
     if (!scp) {
         return;
     }
+    sc_atempo_close(scp);
     pthread_mutex_destroy(&scp->audio_clock_mutex);
     scp->audio_lin_ready = 0;
 }
@@ -115,6 +122,190 @@ void init_sws_audio(SCPlayer *scp){
                         NULL);
     swr_init(scp->audio_swr_ctx);
 }
+
+static void sc_atempo_close(SCPlayer *scp)
+{
+    if (!scp) {
+        return;
+    }
+    avfilter_graph_free(&scp->audio_filter_graph);
+    scp->audio_buffersrc_ctx = NULL;
+    scp->audio_buffersink_ctx = NULL;
+    scp->audio_filter_tempo = 1.0;
+}
+
+/* abuffer -> atempo -> abuffersink，S16 进出，变速不变调 */
+static int sc_atempo_open(SCPlayer *scp, int sample_rate, AVChannelLayout *ch_layout, double tempo)
+{
+    char args[256];
+    char ch_desc[128];
+    int ret;
+    const AVFilter *abuffersrc;
+    const AVFilter *abuffersink;
+    const AVFilter *atempo;
+    AVFilterContext *atempo_ctx = NULL;
+    AVFilterGraph *graph;
+
+    sc_atempo_close(scp);
+    if (tempo < 0.5) {
+        tempo = 0.5;
+    }
+    if (tempo > 2.0) {
+        tempo = 2.0;
+    }
+
+    graph = avfilter_graph_alloc();
+    if (!graph) {
+        return AVERROR(ENOMEM);
+    }
+
+    abuffersrc = avfilter_get_by_name("abuffer");
+    abuffersink = avfilter_get_by_name("abuffersink");
+    atempo = avfilter_get_by_name("atempo");
+    if (!abuffersrc || !abuffersink || !atempo) {
+        avfilter_graph_free(&graph);
+        return AVERROR_FILTER_NOT_FOUND;
+    }
+
+    av_channel_layout_describe(ch_layout, ch_desc, sizeof(ch_desc));
+    snprintf(args, sizeof(args),
+             "time_base=1/%d:sample_rate=%d:sample_fmt=s16:channel_layout=%s",
+             sample_rate, sample_rate, ch_desc);
+
+    ret = avfilter_graph_create_filter(&scp->audio_buffersrc_ctx, abuffersrc, "in",
+                                       args, NULL, graph);
+    if (ret < 0) {
+        goto fail;
+    }
+
+    {
+        char tempo_args[64];
+        snprintf(tempo_args, sizeof(tempo_args), "tempo=%f", tempo);
+        ret = avfilter_graph_create_filter(&atempo_ctx, atempo, "atempo",
+                                           tempo_args, NULL, graph);
+        if (ret < 0) {
+            goto fail;
+        }
+    }
+
+    ret = avfilter_graph_create_filter(&scp->audio_buffersink_ctx, abuffersink, "out",
+                                       NULL, NULL, graph);
+    if (ret < 0) {
+        goto fail;
+    }
+
+    {
+        enum AVSampleFormat out_fmts[] = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+        ret = av_opt_set_int_list(scp->audio_buffersink_ctx, "sample_fmts", out_fmts,
+                                  AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+        if (ret < 0) {
+            goto fail;
+        }
+    }
+
+    ret = avfilter_link(scp->audio_buffersrc_ctx, 0, atempo_ctx, 0);
+    if (ret < 0) {
+        goto fail;
+    }
+    ret = avfilter_link(atempo_ctx, 0, scp->audio_buffersink_ctx, 0);
+    if (ret < 0) {
+        goto fail;
+    }
+
+    ret = avfilter_graph_config(graph, NULL);
+    if (ret < 0) {
+        goto fail;
+    }
+
+    scp->audio_filter_graph = graph;
+    scp->audio_filter_tempo = tempo;
+    return 0;
+
+fail:
+    avfilter_graph_free(&graph);
+    scp->audio_buffersrc_ctx = NULL;
+    scp->audio_buffersink_ctx = NULL;
+    return ret;
+}
+
+/*
+ 对已是 S16 交织的 PCM 做 atempo。
+ tempo>1 加快（输出变短），音色/音高保持。
+ 返回输出字节数，失败 <0。
+ */
+static int sc_atempo_process_s16(SCPlayer *scp, uint8_t *pcm, int nb_samples,
+                                 int channels, int sample_rate, double tempo,
+                                 uint8_t **out_pcm)
+{
+    AVFrame *in_frame = NULL;
+    AVFrame *out_frame = NULL;
+    int ret;
+    int out_bytes = 0;
+    unsigned int malloc_size = 0;
+    AVChannelLayout ch = {0};
+
+    if (!scp || !pcm || nb_samples <= 0) {
+        return -1;
+    }
+    if (fabs(tempo - 1.0) < 0.001) {
+        return nb_samples * channels * 2;
+    }
+
+    av_channel_layout_default(&ch, channels);
+    if (!scp->audio_filter_graph || fabs(scp->audio_filter_tempo - tempo) > 0.001) {
+        ret = sc_atempo_open(scp, sample_rate, &ch, tempo);
+        if (ret < 0) {
+            av_channel_layout_uninit(&ch);
+            return ret;
+        }
+    }
+
+    in_frame = av_frame_alloc();
+    out_frame = av_frame_alloc();
+    if (!in_frame || !out_frame) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    in_frame->format = AV_SAMPLE_FMT_S16;
+    in_frame->sample_rate = sample_rate;
+    in_frame->nb_samples = nb_samples;
+    ret = av_channel_layout_copy(&in_frame->ch_layout, &ch);
+    if (ret < 0) {
+        goto end;
+    }
+    ret = av_frame_get_buffer(in_frame, 0);
+    if (ret < 0) {
+        goto end;
+    }
+    memcpy(in_frame->data[0], pcm, (size_t)nb_samples * channels * 2);
+
+    ret = av_buffersrc_add_frame_flags(scp->audio_buffersrc_ctx, in_frame, 0);
+    if (ret < 0) {
+        goto end;
+    }
+
+    ret = av_buffersink_get_frame(scp->audio_buffersink_ctx, out_frame);
+    if (ret < 0) {
+        goto end;
+    }
+
+    out_bytes = out_frame->nb_samples * channels * 2;
+    av_fast_malloc(out_pcm, &malloc_size, out_bytes + 32);
+    if (!*out_pcm) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    memcpy(*out_pcm, out_frame->data[0], out_bytes);
+    ret = out_bytes;
+
+end:
+    av_frame_free(&in_frame);
+    av_frame_free(&out_frame);
+    av_channel_layout_uninit(&ch);
+    return ret;
+}
+
 
 /*
  有未消耗完的包 → 强制少吐采样加快消耗（靠队列深度，不单靠时钟）。
@@ -306,34 +497,24 @@ static int audio_decode_frame_external(SCPlayer *scp)
             /* get 后还有包 = 没消耗完 → 强制快播 */
             wanted_nb_samples = sc_synchronize_audio_to_ext(scp, scp->audio_frame.nb_samples);
 
+            /* 先 swr 成 S16（不做 compensation，避免变调） */
+            if (!scp->audio_swr_ctx){
+                init_sws_audio(scp);
+            }
             if (scp->audio_swr_ctx){
                 const uint8_t **in = (const uint8_t **)scp->audio_frame.extended_data;
                 int in_count = scp->audio_frame.nb_samples;
                 uint8_t **out = &scp->audio_buf;
-                int out_count = wanted_nb_samples + 256;
+                int out_count = scp->audio_frame.nb_samples + 256;
                 int out_size = av_samples_get_buffer_size(NULL,
                                                           scp->audio_frame.ch_layout.nb_channels,
                                                           out_count, AV_SAMPLE_FMT_S16, 0);
                 unsigned int  malloc_size = 0;
                 av_fast_malloc(&scp->audio_buf, &malloc_size, out_size);
-
-                if (wanted_nb_samples != scp->audio_frame.nb_samples) {
-                    if (swr_set_compensation(scp->audio_swr_ctx,
-                                             wanted_nb_samples - scp->audio_frame.nb_samples,
-                                             wanted_nb_samples) < 0) {
-                        wanted_nb_samples = scp->audio_frame.nb_samples;
-                    }
-                } else {
-                    swr_set_compensation(scp->audio_swr_ctx, 0, 0);
-                }
-
-                len2 = swr_convert(scp->audio_swr_ctx,
-                                   out,
-                                   out_count,
-                                   in,
-                                   in_count);
-
-                data_size = len2 * scp->audio_frame.ch_layout.nb_channels * av_get_bytes_per_sample(AV_SAMPLE_FMT_S16);
+                swr_set_compensation(scp->audio_swr_ctx, 0, 0);
+                len2 = swr_convert(scp->audio_swr_ctx, out, out_count, in, in_count);
+                data_size = len2 * scp->audio_frame.ch_layout.nb_channels *
+                            av_get_bytes_per_sample(AV_SAMPLE_FMT_S16);
             } else {
                 scp->audio_buf = scp->audio_frame.data[0];
                 data_size = av_samples_get_buffer_size(NULL,
@@ -342,6 +523,22 @@ static int audio_decode_frame_external(SCPlayer *scp)
                                                        scp->audio_frame.format,
                                                        1);
             }
+
+            /* 需要加快消耗：atempo 变速不变调 */
+            if (wanted_nb_samples > 0 &&
+                wanted_nb_samples != scp->audio_frame.nb_samples &&
+                data_size > 0 && scp->audio_buf) {
+                double tempo = (double)scp->audio_frame.nb_samples / (double)wanted_nb_samples;
+                int ch = scp->audio_frame.ch_layout.nb_channels;
+                int rate = scp->audio_ctx->sample_rate;
+                int at_ret = sc_atempo_process_s16(scp, scp->audio_buf, len2 > 0 ? len2 : scp->audio_frame.nb_samples,
+                                                   ch, rate, tempo, &scp->audio_buf);
+                if (at_ret > 0) {
+                    data_size = at_ret;
+                }
+                /* atempo 失败则保持原速 S16，不变调硬拉 */
+            }
+
             if (!isnan(scp->audio_frame.pts)) {
                 scp->audio_write_pts = sc_ts_to_ms(scp->audio_frame.pts, scp->audio_st->time_base);
             } else {

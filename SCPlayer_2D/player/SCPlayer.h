@@ -98,6 +98,9 @@ typedef struct AudioInfo{
 // opaque: SCPlayer*; userData: 调用方上下文（如 ViewController*）
 typedef int (*Player_call_other)(AVFrame *, int, void *opaque, void *userData);
 
+typedef struct AVFilterGraph AVFilterGraph;
+typedef struct AVFilterContext AVFilterContext;
+
 typedef struct SCPlayer{
     //文件头信息
     char *filename;
@@ -146,6 +149,11 @@ typedef struct SCPlayer{
     uint8_t         *audio_pkt_data; //音频原始数据
     int             audio_pkt_size;
     struct SwrContext *audio_swr_ctx; //音频重采样
+    /* atempo：变速不变调（EXTERNAL 快消耗时用） */
+    AVFilterGraph   *audio_filter_graph;
+    AVFilterContext *audio_buffersrc_ctx;
+    AVFilterContext *audio_buffersink_ctx;
+    double           audio_filter_tempo;
     AudioInfo       audioInfo;       //音频参数
 
     // 视频
