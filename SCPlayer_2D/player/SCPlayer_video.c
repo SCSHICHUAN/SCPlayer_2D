@@ -309,8 +309,8 @@ void video_refresh_timer(void *userdata){
     
     if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
         video_refresh_timer_audio_clock(userdata);
-    } else  if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
-        video_refresh_timer_audio_clock(userdata);
+    } else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
+        video_refresh_timer_external_clock(userdata);
     }
     
    

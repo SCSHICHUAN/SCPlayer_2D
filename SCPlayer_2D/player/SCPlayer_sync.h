@@ -14,11 +14,14 @@
 #include "SCPlayer_audio.h"
 #include "SCPlayer_video.h"
 
+#define SC_NOSYNC_THRESHOLD_MS    10000.0
+
+void sc_ext_clock_init(SCPlayer *scp);
+void sc_ext_clock_set(SCPlayer *scp, double pts_ms);
+double sc_ext_clock_get(SCPlayer *scp);
+void sc_ext_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms);
+
 void video_refresh_timer_audio_clock(void *userdata);
 void video_refresh_timer_external_clock(void *userdata);
 
-
-
 #endif /* SCPlayer_sync_h */
-
-

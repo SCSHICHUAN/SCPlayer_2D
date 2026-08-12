@@ -100,12 +100,16 @@ int audion_queue_call_other(void *userData, int flag, int len,
         return -1;
     }
     if (flag == 0) {
-        /* 解码取 PCM */
-        if (scp->audioq.nb_packets <= 0) {
+        /* 解码取 PCM；EXTERNAL 无包时由 audio 侧复用上一盒，不再填静音 */
+        if (scp->av_sync_type != AV_SYNC_EXTERNAL_MASTER &&
+            scp->audioq.nb_packets <= 0) {
             return 1; /* 暂无：上层填静音 */
         }
         audio_decode_callback(scp, NULL, 0);//需要数据
         if (!scp->audio_buf || scp->out_audio_size <= 0) {
+            if (scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER) {
+                return 1; /* 尚无上一盒：静音占位 */
+            }
             return -1; /* 结束 */
         }
         if (outPCM) {

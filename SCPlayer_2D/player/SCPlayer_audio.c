@@ -7,7 +7,10 @@
 //
 
 #include "SCPlayer_audio.h"
+#include "SCPlayer_sync.h"
 #include <math.h>
+
+#define SC_SAMPLE_CORRECTION_PERCENT_MAX 10
 
 static int audio_bytes_per_sec(SCPlayer *scp)
 {
@@ -59,6 +62,12 @@ void audio_aq_interp_start(SCPlayer *scp)
     scp->audio_lin_ready = 0;
     scp->audio_lin_paused = 0;
     scp->audio_lin_elapsed_ms = 0;
+    if (scp->audio_ctx && scp->audio_ctx->sample_rate > 0) {
+        scp->audio_diff_threshold_ms =
+            sc_sec_to_ms(2.0 * (double)AUDIO_BUFFER_SIZE / (double)scp->audio_ctx->sample_rate);
+    } else {
+        scp->audio_diff_threshold_ms = 50.0;
+    }
 }
 
 void audio_aq_interp_stop(SCPlayer *scp)
@@ -87,24 +96,93 @@ void audio_aq_set_paused(SCPlayer *scp, int paused)
     pthread_mutex_unlock(&scp->audio_clock_mutex);
 }
 
-//音频重采样初始化
+/* 始终建 swr→S16，EXTERNAL 才能 swr_set_compensation */
 void init_sws_audio(SCPlayer *scp){
     AVChannelLayout in_ch_layout, out_ch_layout;
+    if (scp->audio_swr_ctx) {
+        return;
+    }
     av_channel_layout_copy(&in_ch_layout, &scp->audio_ctx->ch_layout);
     av_channel_layout_copy(&out_ch_layout, &in_ch_layout);
-    if (scp->audio_ctx->sample_fmt != AV_SAMPLE_FMT_S16)
-    { // 需要重采样
-        swr_alloc_set_opts2(&scp->audio_swr_ctx,
-                            &out_ch_layout,        // 输出声道数
-                            AV_SAMPLE_FMT_S16,     // 输出采样深度
-                            scp->audio_ctx->sample_rate, // 输出采样率
-                            &in_ch_layout,         // 输入省道数
-                            scp->audio_ctx->sample_fmt,  // 输入采样深度
-                            scp->audio_ctx->sample_rate, // 输入采样率
-                            0,
-                            NULL);
-        swr_init(scp->audio_swr_ctx);
+    swr_alloc_set_opts2(&scp->audio_swr_ctx,
+                        &out_ch_layout,
+                        AV_SAMPLE_FMT_S16,
+                        scp->audio_ctx->sample_rate,
+                        &in_ch_layout,
+                        scp->audio_ctx->sample_fmt,
+                        scp->audio_ctx->sample_rate,
+                        0,
+                        NULL);
+    swr_init(scp->audio_swr_ctx);
+}
+
+/*
+ 有未消耗完的包 → 强制少吐采样加快消耗（靠队列深度，不单靠时钟）。
+ */
+static int sc_synchronize_audio_to_ext(SCPlayer *scp, int nb_samples)
+{
+    int wanted;
+    double diff;
+    double ext;
+    int min_nb;
+    int freq;
+
+    if (!scp || nb_samples <= 0) {
+        return nb_samples;
     }
+    /* 没有未消耗完的包：原速 */
+    if (scp->audioq.nb_packets <= 0) {
+        return nb_samples;
+    }
+
+    freq = scp->audio_ctx ? scp->audio_ctx->sample_rate : 0;
+    if (freq <= 0) {
+        return nb_samples;
+    }
+
+    min_nb = nb_samples * (100 - SC_SAMPLE_CORRECTION_PERCENT_MAX) / 100;
+    /* 队列没消耗干净：直接最大加速 */
+    wanted = min_nb;
+
+    ext = sc_ext_clock_get(scp);
+    if (!isnan(ext)) {
+        diff = get_audio_clock(scp) - ext;
+        if (!isnan(diff) && diff < 0 &&
+            fabs(diff) >= scp->audio_diff_threshold_ms &&
+            fabs(diff) < SC_NOSYNC_THRESHOLD_MS) {
+            int by_diff = nb_samples + (int)(diff / SC_S_TO_MS * (double)freq);
+            if (by_diff < wanted) {
+                wanted = by_diff;
+            }
+            if (wanted < min_nb) {
+                wanted = min_nb;
+            }
+        }
+    }
+
+    if (wanted > nb_samples) {
+        wanted = nb_samples;
+    }
+    if (wanted < 1) {
+        wanted = 1;
+    }
+    return wanted;
+}
+
+/* 无包：复用上一盒，并把 write_pts 按本盒时长往前推 */
+static int audio_reuse_last_buf(SCPlayer *scp)
+{
+    int bps;
+
+    if (!scp->audio_buf || scp->audio_buf_size == 0) {
+        return 0;
+    }
+    bps = audio_bytes_per_sec(scp);
+    if (bps > 0 && !isnan(scp->audio_write_pts)) {
+        scp->audio_write_pts += sc_sec_to_ms((double)scp->audio_buf_size / (double)bps);
+    }
+    scp->audio_buf_cursor = 0;
+    return (int)scp->audio_buf_size;
 }
 
 //=========================== 解码音频包保存到音频帧到队列中 ===========================
@@ -185,10 +263,102 @@ __OUT:
     return ret;
 }
 
-static int audio_decode_frame_external(SCPlayer *scp){
-    return 0;
-}
+/* EXTERNAL：有积压则重采样快消耗（不丢包）；无包复用上一盒并推 pts */
+static int audio_decode_frame_external(SCPlayer *scp)
+{
+    int ret = -1;
+    int len2;
+    int data_size = 0;
+    int wanted_nb_samples;
 
+    if (scp->audioq.nb_packets <= 0) {
+        return audio_reuse_last_buf(scp);
+    }
+
+    for (;;){
+        ret = packet_queue_get(&scp->audioq, &scp->audio_pkt, 0);
+        if (ret <= 0){
+            return audio_reuse_last_buf(scp);
+        }
+
+        ret = avcodec_send_packet(scp->audio_ctx, &scp->audio_pkt);
+        if (ret < 0){
+            av_log(scp->audio_ctx, AV_LOG_ERROR, "Failed to send pkt to audio decoder!\n");
+            av_packet_unref(&scp->audio_pkt);
+            goto __OUT;
+        }
+
+        while (ret >= 0){
+            ret = avcodec_receive_frame(scp->audio_ctx, &scp->audio_frame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF){
+                break;
+            }
+            else if (ret < 0){
+                av_log(scp->audio_ctx, AV_LOG_ERROR, "Failed to receive frame from audio decoder!\n");
+                av_packet_unref(&scp->audio_pkt);
+                goto __OUT;
+            }
+
+            if (!scp->audio_swr_ctx){
+                init_sws_audio(scp);
+            }
+
+            /* get 后还有包 = 没消耗完 → 强制快播 */
+            wanted_nb_samples = sc_synchronize_audio_to_ext(scp, scp->audio_frame.nb_samples);
+
+            if (scp->audio_swr_ctx){
+                const uint8_t **in = (const uint8_t **)scp->audio_frame.extended_data;
+                int in_count = scp->audio_frame.nb_samples;
+                uint8_t **out = &scp->audio_buf;
+                int out_count = wanted_nb_samples + 256;
+                int out_size = av_samples_get_buffer_size(NULL,
+                                                          scp->audio_frame.ch_layout.nb_channels,
+                                                          out_count, AV_SAMPLE_FMT_S16, 0);
+                unsigned int  malloc_size = 0;
+                av_fast_malloc(&scp->audio_buf, &malloc_size, out_size);
+
+                if (wanted_nb_samples != scp->audio_frame.nb_samples) {
+                    if (swr_set_compensation(scp->audio_swr_ctx,
+                                             wanted_nb_samples - scp->audio_frame.nb_samples,
+                                             wanted_nb_samples) < 0) {
+                        wanted_nb_samples = scp->audio_frame.nb_samples;
+                    }
+                } else {
+                    swr_set_compensation(scp->audio_swr_ctx, 0, 0);
+                }
+
+                len2 = swr_convert(scp->audio_swr_ctx,
+                                   out,
+                                   out_count,
+                                   in,
+                                   in_count);
+
+                data_size = len2 * scp->audio_frame.ch_layout.nb_channels * av_get_bytes_per_sample(AV_SAMPLE_FMT_S16);
+            } else {
+                scp->audio_buf = scp->audio_frame.data[0];
+                data_size = av_samples_get_buffer_size(NULL,
+                                                       scp->audio_frame.ch_layout.nb_channels,
+                                                       scp->audio_frame.nb_samples,
+                                                       scp->audio_frame.format,
+                                                       1);
+            }
+            if (!isnan(scp->audio_frame.pts)) {
+                scp->audio_write_pts = sc_ts_to_ms(scp->audio_frame.pts, scp->audio_st->time_base);
+            } else {
+                scp->audio_write_pts = NAN;
+            }
+            scp->audio_buf_size = (unsigned int)FFMAX(data_size, 0);
+            scp->audio_buf_cursor = 0;
+
+            av_packet_unref(&scp->audio_pkt);
+            av_frame_unref(&scp->audio_frame);
+            return data_size;
+        }
+        av_packet_unref(&scp->audio_pkt);
+    }
+__OUT:
+    return ret;
+}
 
 void audio_decode_callback(void *userdata, uint8_t *stream, int len){
     SCPlayer *scp = (SCPlayer *)userdata;
@@ -197,7 +367,7 @@ void audio_decode_callback(void *userdata, uint8_t *stream, int len){
     if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
         scp->out_audio_size = audio_decode_frame_audio(scp);
     }  else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
-        audio_decode_frame_external(scp);
+        scp->out_audio_size = audio_decode_frame_external(scp);
     }
    
 }
@@ -219,13 +389,13 @@ void audio_queue_wrote(SCPlayer *scp, int bytes)
     scp->audio_lin_elapsed_ms = 0;
     scp->audio_lin_ready = 1;
     pthread_mutex_unlock(&scp->audio_clock_mutex);
+
+    /* 外部钟只钉一次；之后不被音频拉回 */
+    if (scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER) {
+        sc_ext_clock_sync_to_slave(scp, get_audio_clock(scp));
+    }
 }
 
-void audio_queue_consumed(SCPlayer *scp, int bytes)
-{
-    (void)scp;
-    (void)bytes;
-}
 
 int audio_wanted_spec(void *opaque,
                       AVChannelLayout *wanted_channel_layout,

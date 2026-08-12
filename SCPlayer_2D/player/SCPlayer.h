@@ -35,7 +35,7 @@ enum {
   AV_SYNC_EXTERNAL_MASTER,
 };
 
-static int av_sync_type = AV_SYNC_AUDIO_MASTER;
+static int av_sync_type = AV_SYNC_EXTERNAL_MASTER;
 
 
 
@@ -105,6 +105,12 @@ typedef struct SCPlayer{
 
     //音视频同步相关
     int av_sync_type;
+    int realtime;
+
+    /* 外部钟（ms）：无 speed，钉住后墙钟 1:1；音频跟它，视频跟音频 */
+    double          ext_pts;
+    double          ext_pts_drift;
+    double          ext_last_updated;
 
     double          audio_ref_clock;  // 音频播放到的时间点
     double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
@@ -115,6 +121,10 @@ typedef struct SCPlayer{
     int             audio_lin_paused;
     double          audio_lin_elapsed_ms; /* 暂停时冻结的已流逝时长 */
     pthread_mutex_t audio_clock_mutex;
+    double          audio_diff_cum;
+    double          audio_diff_avg_coef;
+    int             audio_diff_avg_count;
+    double          audio_diff_threshold_ms;
     double          frame_timer;     //下一帧应对齐的墙钟时刻（ms）
     double          frame_last_pts;  //上一帧视频 pts（ms）
     double          frame_last_delay;//上一帧间隔 delay（ms）

@@ -9,6 +9,8 @@
 #include "SCPlayer.h"
 #include "SCPlayer_audio.h"
 #include "SCPlayer_video.h"
+#include "SCPlayer_sync.h"
+#include <string.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/display.h>
@@ -599,10 +601,9 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             if(ret < 0){
                 goto __ERROR;
             }
-            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER ||
+               scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
                 ret = audio_wanted_spec(scp,&ch_layout,sample_rate);
-            } else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
-                
             }
             
             if(ret < 0){
@@ -692,6 +693,15 @@ void *read_thread(void *arg){
     if(avformat_find_stream_info(ic, NULL) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Couldn't find stream information\n");
         goto __ERROR;
+    }
+
+    /* rtmp/rtsp 等：外部钟可按包量调 speed */
+    {
+        const char *url = scp->filename ? scp->filename : "";
+        scp->realtime = (!strncmp(url, "rtmp", 4) ||
+                         !strncmp(url, "rtsp", 4) ||
+                         !strncmp(url, "rtp:", 4) ||
+                         !strncmp(url, "udp:", 4)) ? 1 : 0;
     }
     
     //3. Find the first audio and video stream
@@ -866,6 +876,8 @@ static SCPlayer *stream_open(const char* filename){
     }
     
     scp->av_sync_type = av_sync_type;
+    scp->realtime = 0;
+    sc_ext_clock_init(scp);
     if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
         av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
         goto __ERROR;
@@ -877,20 +889,13 @@ __ERROR:
     stream_close(scp);
     return NULL;
 }
-//系统时间 / 外部时钟（ms）
-double get_external_clock(void){
-    return av_gettime_ms();
-}
-
-//当前音频播放的时刻
+// EXTERNAL 时视频仍拿音频钟；外部钟只给音频纠偏用（sc_ext_clock_get）
 double get_maste_clock(SCPlayer *scp){
-    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
-        return get_audio_clock(scp);
-    } else if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
+    if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
         return get_video_clock(scp);
-    } else {
-        return get_external_clock();
     }
+    /* AUDIO_MASTER / EXTERNAL_MASTER：视频跟音频 */
+    return get_audio_clock(scp);
 }
 
 static void do_exit(SCPlayer *scp){

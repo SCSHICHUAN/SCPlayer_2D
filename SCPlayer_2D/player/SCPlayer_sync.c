@@ -7,8 +7,51 @@
 //
 
 #include "SCPlayer_sync.h"
+#include <math.h>
 
-//音频主时钟同步
+void sc_ext_clock_init(SCPlayer *scp)
+{
+    if (!scp) {
+        return;
+    }
+    scp->ext_pts = NAN;
+    scp->ext_pts_drift = NAN;
+    scp->ext_last_updated = 0;
+}
+
+void sc_ext_clock_set(SCPlayer *scp, double pts_ms)
+{
+    double time;
+    if (!scp || isnan(pts_ms)) {
+        return;
+    }
+    time = av_gettime_ms();
+    scp->ext_pts = pts_ms;
+    scp->ext_last_updated = time;
+    scp->ext_pts_drift = pts_ms - time;
+}
+
+/* 无 speed：钉住后只跟墙钟 1:1 推进 */
+double sc_ext_clock_get(SCPlayer *scp)
+{
+    if (!scp || isnan(scp->ext_pts_drift)) {
+        return NAN;
+    }
+    return scp->ext_pts_drift + av_gettime_ms();
+}
+
+/* 只在外部钟尚未钉住时用 slave 初始化；之后外部钟只跟墙钟，不被音频拉回 */
+void sc_ext_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms)
+{
+    if (!scp || isnan(slave_pts_ms)) {
+        return;
+    }
+    if (isnan(sc_ext_clock_get(scp))) {
+        sc_ext_clock_set(scp, slave_pts_ms);
+    }
+}
+
+//音频主时钟同步（视频逻辑不改）
 void video_refresh_timer_audio_clock(void *userdata){
 
     SCPlayer *scp = (SCPlayer*)userdata;
@@ -40,9 +83,8 @@ void video_refresh_timer_audio_clock(void *userdata){
     }
 
 }
-//音视频同步到外部时钟
+
+/* EXTERNAL：视频仍跟音频钟 */
 void video_refresh_timer_external_clock(void *userdata){
-   
-    SCPlayer *scp = (SCPlayer*)userdata;
-    
+    video_refresh_timer_audio_clock(userdata);
 }
