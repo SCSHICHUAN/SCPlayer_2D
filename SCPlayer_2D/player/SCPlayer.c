@@ -599,7 +599,12 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             if(ret < 0){
                 goto __ERROR;
             }
-            ret = audio_wanted_spec(scp,&ch_layout,sample_rate);
+            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+                ret = audio_wanted_spec(scp,&ch_layout,sample_rate);
+            } else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
+                
+            }
+            
             if(ret < 0){
                 av_log(NULL,AV_LOG_ERROR,"不能打开音频设备!\n");
                 // goto __ERROR;

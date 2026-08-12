@@ -108,7 +108,7 @@ void init_sws_audio(SCPlayer *scp){
 }
 
 //=========================== 解码音频包保存到音频帧到队列中 ===========================
-static int audio_decode_frame(SCPlayer *scp)
+static int audio_decode_frame_audio(SCPlayer *scp)
 {
     int ret = -1;
     int len2;
@@ -185,13 +185,21 @@ __OUT:
     return ret;
 }
 
+static int audio_decode_frame_external(SCPlayer *scp){
+    return 0;
+}
 
-void audio_decode_callback(void *userdata, uint8_t *stream, int len)
-{
+
+void audio_decode_callback(void *userdata, uint8_t *stream, int len){
     SCPlayer *scp = (SCPlayer *)userdata;
     (void)stream;
     (void)len;
-    scp->out_audio_size = audio_decode_frame(scp);
+    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+        scp->out_audio_size = audio_decode_frame_audio(scp);
+    }  else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
+        audio_decode_frame_external(scp);
+    }
+   
 }
 
 /* flag 2：重置线性时钟基点 → get_audio_clock = pts + 线性(0~size) */
