@@ -10,9 +10,11 @@
 #define SCPlayer_video_h
 
 #include "SCPlayer.h"
+#include "SCPlayer_sync.h"
 
 void *video_decode_thread(void *arg);
 void video_refresh_timer(void *userdata);
 double get_video_clock(SCPlayer *scp);
+void video_dscpplay(SCPlayer *scp);
 
 #endif /* SCPlayer_video_h */

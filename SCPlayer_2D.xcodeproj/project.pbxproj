@@ -39,6 +39,7 @@
 		F68807E12B58367200BC579B /* wood.jpg in Resources */ = {isa = PBXBuildFile; fileRef = F68807E02B58367200BC579B /* wood.jpg */; };
 		F68808062B58394800BC579B /* libjpeg.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F68808042B58394800BC579B /* libjpeg.a */; };
 		F68808072B58394800BC579B /* JpegUtil.c in Sources */ = {isa = PBXBuildFile; fileRef = F68808052B58394800BC579B /* JpegUtil.c */; };
+		F68C9BBF302C460500D98A6E /* SCPlayer_sync.c in Sources */ = {isa = PBXBuildFile; fileRef = F68C9BBE302C460500D98A6E /* SCPlayer_sync.c */; };
 		F69122FA2B47E88800973F18 /* vertex.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F69122F82B47E88800973F18 /* vertex.glsl */; };
 		F69122FB2B47E88800973F18 /* yuv_fragment.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F69122F92B47E88800973F18 /* yuv_fragment.glsl */; };
 		F692D1213020515400BFA21B /* SCPlayer_video.c in Sources */ = {isa = PBXBuildFile; fileRef = F692D1203020515400BFA21B /* SCPlayer_video.c */; };
@@ -96,6 +97,8 @@
 		F68808012B58394800BC579B /* jmorecfg.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = jmorecfg.h; sourceTree = "<group>"; };
 		F68808042B58394800BC579B /* libjpeg.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libjpeg.a; sourceTree = "<group>"; };
 		F68808052B58394800BC579B /* JpegUtil.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = JpegUtil.c; sourceTree = "<group>"; };
+		F68C9BBD302C460500D98A6E /* SCPlayer_sync.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer_sync.h; sourceTree = "<group>"; };
+		F68C9BBE302C460500D98A6E /* SCPlayer_sync.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer_sync.c; sourceTree = "<group>"; };
 		F69122F82B47E88800973F18 /* vertex.glsl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = vertex.glsl; sourceTree = "<group>"; };
 		F69122F92B47E88800973F18 /* yuv_fragment.glsl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = yuv_fragment.glsl; sourceTree = "<group>"; };
 		F692D11F3020515400BFA21B /* SCPlayer_video.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer_video.h; sourceTree = "<group>"; };
@@ -309,6 +312,8 @@
 				F692D1233020516600BFA21B /* SCPlayer_audio.c */,
 				F692D11F3020515400BFA21B /* SCPlayer_video.h */,
 				F692D1203020515400BFA21B /* SCPlayer_video.c */,
+				F68C9BBD302C460500D98A6E /* SCPlayer_sync.h */,
+				F68C9BBE302C460500D98A6E /* SCPlayer_sync.c */,
 				F6C7552B2C5CC2BD006EFCDF /* OCRender.h */,
 				F6C7552C2C5CC2BD006EFCDF /* OCRender.m */,
 			);
@@ -410,6 +415,7 @@
 				8B076F69228FE85200ACCD47 /* main.m in Sources */,
 				F692D1243020516600BFA21B /* SCPlayer_audio.c in Sources */,
 				F69FECEA2C3F878700ACFC92 /* SCAudioQueuePlayer.m in Sources */,
+				F68C9BBF302C460500D98A6E /* SCPlayer_sync.c in Sources */,
 				A1B2C3D42E6F8000111111 /* SCDropdownButton.m in Sources */,
 				8B076F5B228FE85200ACCD47 /* AppDelegate.m in Sources */,
 				F66487002B57CE220017426C /* SCRender.mm in Sources */,

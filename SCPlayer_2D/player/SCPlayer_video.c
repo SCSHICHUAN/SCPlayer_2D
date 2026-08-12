@@ -236,7 +236,7 @@ double get_video_clock(SCPlayer *scp){
 
 
 /* 克隆后立即出队，与同步无关；busy 时丢弃本帧拷贝，不卡住刷新 */
-static void video_dscpplay(SCPlayer *scp){
+void video_dscpplay(SCPlayer *scp){
     Frame *vp;
     AVFrame *owned;
 
@@ -290,37 +290,6 @@ static void video_drop_late_frames(SCPlayer *scp, double frame_ms)
     }
 }
 
-void video_refresh_timer_tmp(void *userdata){
-
-    SCPlayer *scp = (SCPlayer*)userdata;
-    Frame *vp = NULL;
-    double diff,ref_clock = 0;
-
-    if(scp->video_st){
-
-        if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
-            scp->delay_video_time = 1;// 1ms 调用
-        } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {
-            scp->delay_video_time = 5;//音频时钟尚未建立：先别开跑，避免启动阶段乱追
-        } else {
-            //下一帧视频播放时间
-            vp = frame_queue_peek(&scp->pictq);//读起视频帧
-            ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
-            scp->audio_ref_clock = ref_clock;
-            diff = vp->pts - ref_clock;
-            scp->delay_video_time = diff;
-            if(diff <= 0){
-                diff = 0;
-            }
-            video_dscpplay(scp);
-//            printf("diff = %.2f ms \n",diff);
-        }
-    } else {
-        scp->delay_video_time = 100;//等待打开视频流
-    }
-
-}
-
 /* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
 static inline double sc_video_frame_ms(const SCPlayer *scp) {
     if (scp && scp->frame_duration > 0) {
@@ -329,100 +298,111 @@ static inline double sc_video_frame_ms(const SCPlayer *scp) {
     return SC_DEFAULT_FRAME_DURATION_MS;
 }
 
+
+
+
+
 //刷新视频帧
 void video_refresh_timer(void *userdata){
-    return video_refresh_timer_tmp(userdata);
-    
+
     SCPlayer *scp = (SCPlayer*)userdata;
-    Frame *vp = NULL;
-    double actual_delay,delay,sync_threshold,ref_clock,diff = 0;
-    double frame_ms = sc_video_frame_ms(scp); //视频帧默认时间
     
-    if(scp->video_st){
-        
-        if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
-            scp->delay_video_time = 1;// 1ms 调用
-        } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {//音频时钟尚未建立：先别开跑，避免启动阶段乱追
-            scp->delay_video_time = 5;
-        } else {
-            /* 若已明显落后，先丢到接近音频再算 delay */
-            video_drop_late_frames(scp, frame_ms);
-           
-            
-            //计算下一帧的显示时间
-            vp = frame_queue_peek(&scp->pictq);//读起视频帧
-            // printf("PTS = %f ms\n",vp->pts);
-            scp->video_current_pts = vp->pts;//对scp的赋值，将要播放的视频帧的pts
-            scp->video_current_pts_time = av_gettime_ms();//但前时钟（ms）
-            
-            if(scp->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
-                delay = frame_ms;
-            } else {
-                delay = vp->pts - scp->frame_last_pts;//将要播放的一帧和上一帧的时间间隔（ms）
-            }
-            
-            /* 非法间隔：<=0 或 >=1s(1000ms) 时回退到上一帧 delay，再不行用 fps 帧间隔 */
-            if(delay <= 0 || delay >= 1000.0){
-                delay = (scp->frame_last_delay > 0) ? scp->frame_last_delay : frame_ms;
-            }
-            //跟新frame_last_delay，frame_last_pts
-            scp->frame_last_delay = delay;
-            scp->frame_last_pts = vp->pts;
-            
-            //推算下一帧视频时间和音频同步，计算delay来同步
-            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
-                ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
-                diff = vp->pts - ref_clock;//将要播放的视频帧 - 播放到的音频时刻 (正常情况下将要播放的视频帧要等diff才可以播放)
-                scp->audio_ref_clock = ref_clock;
-            }
-            
-            /* Skip or repeat the frame. Take delay into account
-             FFPlay still doesn't "know if thscp scp the best guess."
-             对齐 ffplay compute_target_delay（本工程时间单位为 ms）
-             
-             sync_threshold = clamp(delay, 40ms, 100ms)
-             落后：delay = max(0, delay + diff)
-             超前且 delay > 100ms：delay += diff（长帧直接补差，不翻倍）
-             超前且 delay <= 100ms：delay *= 2（短帧用翻倍拉长显示）
-             */
-            const double sync_threshold_min = 40.0;   /* AV_SYNC_THRESHOLD_MIN  0.04s */
-            const double sync_threshold_max = 100.0;  /* AV_SYNC_THRESHOLD_MAX  0.1s  */
-            const double framedup_threshold = 100.0;  /* AV_SYNC_FRAMEDUP_THRESHOLD 0.1s */
-            const double nosync_threshold = 10000.0;  /* AV_NOSYNC_THRESHOLD 10s */
-            
-            sync_threshold = FFMAX(sync_threshold_min, FFMIN(sync_threshold_max, delay));
-            
-            if (!isnan(diff) && fabs(diff) < nosync_threshold) {
-                if (diff <= -sync_threshold) {
-                    /* 视频落后：缩短等待 */
-                    delay = FFMAX(0.0, delay + diff);//慢一点追平滑,不要一下跳过去
-                } else if (diff >= sync_threshold && delay > framedup_threshold) {
-                    /* 长帧超前：直接加上 diff */
-                    delay = delay + diff;
-                } else if (diff >= sync_threshold) {
-                    /* 短帧超前：翻倍等待（重复显示） */
-                    delay = 2.0 * delay;
-                }
-            }
-            
-            
-            printf("DIFF = %f ms  delay = %f ms \n", diff, delay);
-            
-            scp->frame_timer += delay;//推算出下一帧的显示时间点（ms）
-            /* computer the REAL delay
-             一帧确定好系统时间后，后面就将要播放的帧的时间换算成系统时间，
-             如果发现要播放的帧的时间落后于系统时间就将其播放出来。
-             */
-            actual_delay = scp->frame_timer - av_gettime_ms();
-            if (actual_delay < 0) {
-                actual_delay = 0;
-            }
-            scp->delay_video_time = actual_delay;
-            video_dscpplay(scp);
-        }
-        
-    } else {
-        scp->delay_video_time = 100;//等待打开视频流
+    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+        video_refresh_timer_audio_clock(userdata);
+    } else  if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+        video_refresh_timer_audio_clock(userdata);
     }
+    
+   
+//    Frame *vp = NULL;
+//    double actual_delay,delay,sync_threshold,ref_clock,diff = 0;
+//    double frame_ms = sc_video_frame_ms(scp); //视频帧默认时间
+//
+//    if(scp->video_st){
+//
+//        if(scp->pictq.size == 0){//如果视频queue是空的，延时1毫秒 快速的检测
+//            scp->delay_video_time = 1;// 1ms 调用
+//        } else if (scp->av_sync_type == AV_SYNC_AUDIO_MASTER && isnan(scp->audio_clock)) {//音频时钟尚未建立：先别开跑，避免启动阶段乱追
+//            scp->delay_video_time = 5;
+//        } else {
+//            /* 若已明显落后，先丢到接近音频再算 delay */
+//            video_drop_late_frames(scp, frame_ms);
+//
+//
+//            //计算下一帧的显示时间
+//            vp = frame_queue_peek(&scp->pictq);//读起视频帧
+//            // printf("PTS = %f ms\n",vp->pts);
+//            scp->video_current_pts = vp->pts;//对scp的赋值，将要播放的视频帧的pts
+//            scp->video_current_pts_time = av_gettime_ms();//但前时钟（ms）
+//
+//            if(scp->frame_last_pts == 0){//一开始时 frame_last_pts 是为 0
+//                delay = frame_ms;
+//            } else {
+//                delay = vp->pts - scp->frame_last_pts;//将要播放的一帧和上一帧的时间间隔（ms）
+//            }
+//
+//            /* 非法间隔：<=0 或 >=1s(1000ms) 时回退到上一帧 delay，再不行用 fps 帧间隔 */
+//            if(delay <= 0 || delay >= 1000.0){
+//                delay = (scp->frame_last_delay > 0) ? scp->frame_last_delay : frame_ms;
+//            }
+//            //跟新frame_last_delay，frame_last_pts
+//            scp->frame_last_delay = delay;
+//            scp->frame_last_pts = vp->pts;
+//
+//            //推算下一帧视频时间和音频同步，计算delay来同步
+//            if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+//                ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
+//                diff = vp->pts - ref_clock;//将要播放的视频帧 - 播放到的音频时刻 (正常情况下将要播放的视频帧要等diff才可以播放)
+//                scp->audio_ref_clock = ref_clock;
+//            }
+//
+//            /* Skip or repeat the frame. Take delay into account
+//             FFPlay still doesn't "know if thscp scp the best guess."
+//             对齐 ffplay compute_target_delay（本工程时间单位为 ms）
+//
+//             sync_threshold = clamp(delay, 40ms, 100ms)
+//             落后：delay = max(0, delay + diff)
+//             超前且 delay > 100ms：delay += diff（长帧直接补差，不翻倍）
+//             超前且 delay <= 100ms：delay *= 2（短帧用翻倍拉长显示）
+//             */
+//            const double sync_threshold_min = 40.0;   /* AV_SYNC_THRESHOLD_MIN  0.04s */
+//            const double sync_threshold_max = 100.0;  /* AV_SYNC_THRESHOLD_MAX  0.1s  */
+//            const double framedup_threshold = 100.0;  /* AV_SYNC_FRAMEDUP_THRESHOLD 0.1s */
+//            const double nosync_threshold = 10000.0;  /* AV_NOSYNC_THRESHOLD 10s */
+//
+//            sync_threshold = FFMAX(sync_threshold_min, FFMIN(sync_threshold_max, delay));
+//
+//            if (!isnan(diff) && fabs(diff) < nosync_threshold) {
+//                if (diff <= -sync_threshold) {
+//                    /* 视频落后：缩短等待 */
+//                    delay = FFMAX(0.0, delay + diff);//慢一点追平滑,不要一下跳过去
+//                } else if (diff >= sync_threshold && delay > framedup_threshold) {
+//                    /* 长帧超前：直接加上 diff */
+//                    delay = delay + diff;
+//                } else if (diff >= sync_threshold) {
+//                    /* 短帧超前：翻倍等待（重复显示） */
+//                    delay = 2.0 * delay;
+//                }
+//            }
+//
+//
+//            printf("DIFF = %f ms  delay = %f ms \n", diff, delay);
+//
+//            scp->frame_timer += delay;//推算出下一帧的显示时间点（ms）
+//            /* computer the REAL delay
+//             一帧确定好系统时间后，后面就将要播放的帧的时间换算成系统时间，
+//             如果发现要播放的帧的时间落后于系统时间就将其播放出来。
+//             */
+//            actual_delay = scp->frame_timer - av_gettime_ms();
+//            if (actual_delay < 0) {
+//                actual_delay = 0;
+//            }
+//            scp->delay_video_time = actual_delay;
+//            video_dscpplay(scp);
+//        }
+//
+//    } else {
+//        scp->delay_video_time = 100;//等待打开视频流
+//    }
     
 }
