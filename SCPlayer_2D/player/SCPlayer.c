@@ -45,19 +45,19 @@ __attribute__((used)) static const void *const sc_force_link_atempo[] = {
     &ff_af_atempo,
 };
 
-int sc_av_sync_type = AV_SYNC_EXTERNAL_MASTER;
+int av_sync_type = AV_SYNC_EXTERNAL_MASTER;
 
-void sc_set_av_sync_type(int type) {
+void set_av_sync_type(int type) {
     if (type != AV_SYNC_AUDIO_MASTER &&
         type != AV_SYNC_VIDEO_MASTER &&
         type != AV_SYNC_EXTERNAL_MASTER) {
         type = AV_SYNC_EXTERNAL_MASTER;
     }
-    sc_av_sync_type = type;
+    av_sync_type = type;
 }
 
-int sc_get_av_sync_type(void) {
-    return sc_av_sync_type;
+int get_av_sync_type(void) {
+    return av_sync_type;
 }
 
 /*
@@ -632,7 +632,6 @@ int stream_component_open(SCPlayer *scp,int stream_index){
                 av_log(NULL,AV_LOG_ERROR,"不能打开音频设备!\n");
                 // goto __ERROR;
             }
-            scp->audio_ref_clock = 0;
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
             scp->audio_clock = NAN;
@@ -897,9 +896,9 @@ static SCPlayer *stream_open(const char* filename){
         goto __ERROR;
     }
     
-    scp->av_sync_type = sc_av_sync_type;
+    scp->av_sync_type = av_sync_type;
     scp->realtime = 0;
-    sc_external_clock_init(scp);
+    external_clock_init(scp);
     if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
         av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
         goto __ERROR;
@@ -911,13 +910,18 @@ __ERROR:
     stream_close(scp);
     return NULL;
 }
-// EXTERNAL 时视频仍拿音频钟；外部钟只给音频纠偏用（sc_external_clock_get）
+// EXTERNAL 时视频仍拿音频钟；外部钟只给音频纠偏用（get_external_clock）
 double get_maste_clock(SCPlayer *scp){
-    if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
+    
+    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
+        return get_audio_clock(scp);
+    } else if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
         return get_video_clock(scp);
-    } 
-    /* AUDIO_MASTER / EXTERNAL_MASTER：视频跟音频 */
-    return get_audio_clock(scp);
+    } else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
+        return get_external_clock(scp);
+    } else {
+        return 0.0;
+    }
 }
 
 static void do_exit(SCPlayer *scp){

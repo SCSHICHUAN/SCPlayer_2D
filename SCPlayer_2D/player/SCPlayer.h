@@ -35,9 +35,9 @@ enum {
   AV_SYNC_EXTERNAL_MASTER,
 };
 
-extern int sc_av_sync_type;
-void sc_set_av_sync_type(int type);
-int sc_get_av_sync_type(void);
+extern int av_sync_type;
+void set_av_sync_type(int type);
+int get_av_sync_type(void);
 
 
 
@@ -112,12 +112,9 @@ typedef struct SCPlayer{
     int av_sync_type;
     int realtime;
 
-    /* 外部钟（ms）：无 speed，钉住后墙钟 1:1；音频跟它，视频跟音频 */
-    double          external_pts;
-    double          external_pts_drift;
-    double          external_last_updated;
+    /* 外部钟（ms）：external_pts = now - 铆点；未钉住铆点为 NAN */
+    double          external_pts;           // 铆点墙钟（start）；get = av_gettime_ms() - external_pts
 
-    double          audio_ref_clock;  // 音频播放到的时间点
     double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
     double          audio_frame_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
     /* 当前写入 AQ 的这一包 PCM：时钟 = pts + 本包内已播时长(钳在 0~本包时长) */
@@ -127,10 +124,7 @@ typedef struct SCPlayer{
     int             audio_pkt_paused;
     double          audio_pkt_elapsed_ms; /* 暂停时冻结的本包已播时长 */
     pthread_mutex_t audio_clock_mutex;
-    double          audio_diff_cum;
-    double          audio_diff_avg_coef;
-    int             audio_diff_avg_count;
-    double          audio_diff_threshold_ms;
+    double          audio_diff_threshold_ms;  // 纠正门槛（ms）；|diff| 过此才加减速
     double          frame_timer;     //下一帧应对齐的墙钟时刻（ms）
     double          frame_last_pts;  //上一帧视频 pts（ms）
     double          frame_last_delay;//上一帧间隔 delay（ms）
@@ -152,11 +146,11 @@ typedef struct SCPlayer{
     uint8_t         *audio_pkt_data; //音频原始数据
     int             audio_pkt_size;
     struct SwrContext *audio_swr_ctx; //音频重采样
-    /* atempo：变速不变调（EXTERNAL 快消耗时用） */
-    AVFilterGraph   *audio_filter_graph;
-    AVFilterContext *audio_buffersrc_ctx;
-    AVFilterContext *audio_buffersink_ctx;
-    double           audio_filter_tempo;
+    /* atempo：变速不变调（EXTERNAL 快消耗时用）；链 abuffer → atempo → abuffersink */
+    AVFilterGraph   *audio_filter_graph;      // atempo 滤镜图
+    AVFilterContext *audio_buffersrc_ctx;     // 输入：S16 PCM 送入 atempo
+    AVFilterContext *audio_buffersink_ctx;    // 输出：压短后的 S16
+    double           audio_filter_tempo;      // 当前 tempo（>1 加快；与图不一致则重建）
     AudioInfo       audioInfo;       //音频参数
 
     // 视频

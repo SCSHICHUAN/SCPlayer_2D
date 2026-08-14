@@ -9,49 +9,44 @@
 #include "SCPlayer_sync.h"
 #include <math.h>
 
-void sc_external_clock_init(SCPlayer *scp)
+void external_clock_init(SCPlayer *scp)
 {
     if (!scp) {
         return;
     }
-    scp->external_pts = NAN;
-    scp->external_pts_drift = NAN;
-    scp->external_last_updated = 0;
+    scp->external_pts = NAN; /* 未铆 */
 }
 
-void sc_external_clock_set(SCPlayer *scp, double pts_ms)
+void external_clock_set(SCPlayer *scp, double pts_ms)
 {
-    double time;
-    if (!scp || isnan(pts_ms)) {
+    (void)pts_ms;
+    if (!scp) {
         return;
     }
-    time = av_gettime_ms();
-    scp->external_pts = pts_ms;
-    scp->external_last_updated = time;
-    scp->external_pts_drift = pts_ms - time;
+    scp->external_pts = av_gettime_ms(); /* 铆点 */
 }
 
-/* 无 speed：钉住后只跟墙钟 1:1 推进 */
-double sc_external_clock_get(SCPlayer *scp)
+/* external_pts(钟) = now - 铆点 */
+double get_external_clock(SCPlayer *scp)
 {
-    if (!scp || isnan(scp->external_pts_drift)) {
+    if (!scp || isnan(scp->external_pts)) {
         return NAN;
     }
-    return scp->external_pts_drift + av_gettime_ms();
+    return av_gettime_ms() - scp->external_pts;
 }
 
-/* 只在外部钟尚未钉住时用 slave 初始化；之后外部钟只跟墙钟，不被音频拉回 */
-void sc_external_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms)
+/* 只在尚未铆住时钉一次 */
+void external_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms)
 {
     if (!scp || isnan(slave_pts_ms)) {
         return;
     }
-    if (isnan(sc_external_clock_get(scp))) {
-        sc_external_clock_set(scp, slave_pts_ms);
+    if (isnan(scp->external_pts)) {
+        external_clock_set(scp, slave_pts_ms);
     }
 }
 
-//音频主时钟同步（视频逻辑不改）
+//音频主时钟同步
 void video_refresh_timer_audio_clock(void *userdata){
 
     SCPlayer *scp = (SCPlayer*)userdata;
@@ -67,13 +62,12 @@ void video_refresh_timer_audio_clock(void *userdata){
         } else {
             //下一帧视频播放时间
             vp = frame_queue_peek(&scp->pictq);//读起视频帧
-            ref_clock = get_maste_clock(scp);//播放到的音频时刻（ms）
-            scp->audio_ref_clock = ref_clock;
+            ref_clock = get_audio_clock(scp);//播放到的音频时刻（ms）
             diff = vp->pts - ref_clock;
-            scp->delay_video_time = diff;
             if(diff <= 0){
                 diff = 0;
             }
+            scp->delay_video_time = diff;
             video_dscpplay(scp);
 //            printf("diff = %.2f ms \n",diff);
         }
@@ -86,5 +80,6 @@ void video_refresh_timer_audio_clock(void *userdata){
 
 /* EXTERNAL：视频仍跟音频钟 */
 void video_refresh_timer_external_clock(void *userdata){
-    video_refresh_timer_audio_clock(userdata);
+     video_refresh_timer_audio_clock(userdata);
 }
+

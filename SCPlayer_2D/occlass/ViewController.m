@@ -25,6 +25,27 @@
 #import "SCPlayer_audio.h"
 
 static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
+static NSString * const kSCQualityKey = @"SCPlayer.quality";
+
+/* 读用户画质偏好；无记录则默认均衡 */
+static SCRenderQuality SCLoadQuality(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    if ([ud objectForKey:kSCQualityKey] == nil) {
+        return SCRenderQualityBalanced;
+    }
+    NSInteger v = [ud integerForKey:kSCQualityKey];
+    if (v < SCRenderQualityFluent || v > SCRenderQualityUltra) {
+        return SCRenderQualityBalanced;
+    }
+    return (SCRenderQuality)v;
+}
+
+static void SCSaveQuality(SCRenderQuality quality) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:@(quality) forKey:kSCQualityKey];
+    [ud synchronize];
+}
+
 static NSString * const kSCMSAALevelKey = @"SCPlayer.msaaLevel";
 
 /* 读用户抗锯齿偏好；无记录则默认关 */
@@ -59,7 +80,7 @@ static void SCSaveHighLatency(BOOL high) {
     [ud synchronize];
 }
 static void SCApplyLatencyMode(BOOL high) {
-    sc_set_av_sync_type(high ? AV_SYNC_AUDIO_MASTER : AV_SYNC_EXTERNAL_MASTER);
+    set_av_sync_type(high ? AV_SYNC_AUDIO_MASTER : AV_SYNC_EXTERNAL_MASTER);
 }
 
 @interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate>
@@ -387,7 +408,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     SCSaveHighLatency(self.highLatencyMode);
     SCApplyLatencyMode(self.highLatencyMode);
     if (self.playingIs) {
-        self.playingIs->av_sync_type = sc_get_av_sync_type();
+        self.playingIs->av_sync_type = get_av_sync_type();
     }
     [self updateLatencyButtonTitle];
     self.lab.text = self.highLatencyMode ? @"延时: 高延时" : @"延时: 低延时";
@@ -601,14 +622,15 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
                         [self fittingWidthForButtonTitle:@"拉伸铺满"]);
     [modeBtn.widthAnchor constraintEqualToConstant:modeW].active = YES;
 
+    SCRenderQuality savedQuality = SCLoadQuality();
     SCDropdownButton *qualityDrop =
         [[SCDropdownButton alloc] initWithPrefix:@"画质"
                                          options:@[@"流畅", @"均衡", @"高清", @"超清"]
-                                   selectedIndex:SCRenderQualityBalanced];
+                                   selectedIndex:savedQuality];
     qualityDrop.panelAlignment = SCDropdownPanelAlignmentLeading;
     __weak typeof(self) weakSelf = self;
     qualityDrop.selectionHandler = ^(NSInteger index, NSString *title) {
-        (void)title;
+        SCSaveQuality((SCRenderQuality)index); /* 先落盘，不依赖 VC 存活 */
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         strongSelf.cRender.quality = (SCRenderQuality)index;
@@ -765,7 +787,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     ]];
 
     self.controlsVisible = YES;
-    self.cRender.quality = SCRenderQualityBalanced;
+    self.cRender.quality = SCLoadQuality();
     self.cRender.msaaLevel = SCLoadMSAALevel();
     self.userRotateDegrees = 0;
     self.highLatencyMode = SCLoadHighLatency();
@@ -815,10 +837,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     }
     /* 精简一行：同步差 | 渲染耗时 | 音视频包缓存 */
     NSString *line = [NSString stringWithFormat:
-                      @"diff:%.1fms render:%.1fms video:%.2fMB audio:%.2fMB",
+                      @"diff:%.1fms render:%.1fms video:%.2fMB audio:%fMB",
                       diffMs, renderMS, videoMB, audioMB];
-    av_log(NULL, AV_LOG_INFO, "diff:%.1fms render:%.1fms video:%.2fMB audio:%.2fMB time:%.0fms\n",
-           diffMs, renderMS, videoMB, audioMB,self.playingIs->audio_ref_clock);
+    av_log(NULL, AV_LOG_INFO, "diff:%.1fms render:%.1fms video:%.2fMB audio:%fMB \n",
+           diffMs, renderMS, videoMB, audioMB);
     [self.diffLines addObject:line];
     while (self.diffLines.count > 100) {
         [self.diffLines removeObjectAtIndex:0];
@@ -1057,6 +1079,8 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *
         _cRender = [[SCRender alloc] initWithFrame:[UIScreen mainScreen].bounds];
         _cRender.fillMode = SCRenderFillModeAspectFit;
         _cRender.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _cRender.quality = SCLoadQuality();
+        _cRender.msaaLevel = SCLoadMSAALevel();
     }
     return _cRender;
 }
