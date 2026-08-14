@@ -9,45 +9,45 @@
 #include "SCPlayer_sync.h"
 #include <math.h>
 
-void sc_ext_clock_init(SCPlayer *scp)
+void sc_external_clock_init(SCPlayer *scp)
 {
     if (!scp) {
         return;
     }
-    scp->ext_pts = NAN;
-    scp->ext_pts_drift = NAN;
-    scp->ext_last_updated = 0;
+    scp->external_pts = NAN;
+    scp->external_pts_drift = NAN;
+    scp->external_last_updated = 0;
 }
 
-void sc_ext_clock_set(SCPlayer *scp, double pts_ms)
+void sc_external_clock_set(SCPlayer *scp, double pts_ms)
 {
     double time;
     if (!scp || isnan(pts_ms)) {
         return;
     }
     time = av_gettime_ms();
-    scp->ext_pts = pts_ms;
-    scp->ext_last_updated = time;
-    scp->ext_pts_drift = pts_ms - time;
+    scp->external_pts = pts_ms;
+    scp->external_last_updated = time;
+    scp->external_pts_drift = pts_ms - time;
 }
 
 /* 无 speed：钉住后只跟墙钟 1:1 推进 */
-double sc_ext_clock_get(SCPlayer *scp)
+double sc_external_clock_get(SCPlayer *scp)
 {
-    if (!scp || isnan(scp->ext_pts_drift)) {
+    if (!scp || isnan(scp->external_pts_drift)) {
         return NAN;
     }
-    return scp->ext_pts_drift + av_gettime_ms();
+    return scp->external_pts_drift + av_gettime_ms();
 }
 
 /* 只在外部钟尚未钉住时用 slave 初始化；之后外部钟只跟墙钟，不被音频拉回 */
-void sc_ext_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms)
+void sc_external_clock_sync_to_slave(SCPlayer *scp, double slave_pts_ms)
 {
     if (!scp || isnan(slave_pts_ms)) {
         return;
     }
-    if (isnan(sc_ext_clock_get(scp))) {
-        sc_ext_clock_set(scp, slave_pts_ms);
+    if (isnan(sc_external_clock_get(scp))) {
+        sc_external_clock_set(scp, slave_pts_ms);
     }
 }
 

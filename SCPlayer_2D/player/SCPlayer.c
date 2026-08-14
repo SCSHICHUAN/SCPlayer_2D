@@ -636,7 +636,7 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
             scp->audio_clock = NAN;
-            scp->audio_write_pts = NAN;
+            scp->audio_frame_pts = NAN;
             scp->audio_st = st;
             scp->audio_index = stream_index;
             scp->audio_ctx = avctx;
@@ -899,7 +899,7 @@ static SCPlayer *stream_open(const char* filename){
     
     scp->av_sync_type = sc_av_sync_type;
     scp->realtime = 0;
-    sc_ext_clock_init(scp);
+    sc_external_clock_init(scp);
     if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
         av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
         goto __ERROR;
@@ -911,11 +911,11 @@ __ERROR:
     stream_close(scp);
     return NULL;
 }
-// EXTERNAL 时视频仍拿音频钟；外部钟只给音频纠偏用（sc_ext_clock_get）
+// EXTERNAL 时视频仍拿音频钟；外部钟只给音频纠偏用（sc_external_clock_get）
 double get_maste_clock(SCPlayer *scp){
     if(scp->av_sync_type == AV_SYNC_VIDEO_MASTER){
         return get_video_clock(scp);
-    }
+    } 
     /* AUDIO_MASTER / EXTERNAL_MASTER：视频跟音频 */
     return get_audio_clock(scp);
 }

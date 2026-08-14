@@ -113,18 +113,19 @@ typedef struct SCPlayer{
     int realtime;
 
     /* 外部钟（ms）：无 speed，钉住后墙钟 1:1；音频跟它，视频跟音频 */
-    double          ext_pts;
-    double          ext_pts_drift;
-    double          ext_last_updated;
+    double          external_pts;
+    double          external_pts_drift;
+    double          external_last_updated;
 
     double          audio_ref_clock;  // 音频播放到的时间点
     double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
-    double          audio_write_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
-    double          audio_lin_wall_ms;// 上次 wrote 时的墙钟（ms）
-    unsigned int    audio_lin_bytes;  // 上次 wrote 的盒大小（线性 0~size）
-    int             audio_lin_ready;  // 已有至少一次 wrote
-    int             audio_lin_paused;
-    double          audio_lin_elapsed_ms; /* 暂停时冻结的已流逝时长 */
+    double          audio_frame_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
+    /* 当前写入 AQ 的这一包 PCM：时钟 = pts + 本包内已播时长(钳在 0~本包时长) */
+    double          audio_pkt_wall_ms;     /* 本包 wrote 时的墙钟（ms） */
+    unsigned int    audio_pkt_bytes;      /* 本包字节数 → 本包时长 */
+    int             audio_pkt_ready;      /* 已有至少一次 wrote */
+    int             audio_pkt_paused;
+    double          audio_pkt_elapsed_ms; /* 暂停时冻结的本包已播时长 */
     pthread_mutex_t audio_clock_mutex;
     double          audio_diff_cum;
     double          audio_diff_avg_coef;
