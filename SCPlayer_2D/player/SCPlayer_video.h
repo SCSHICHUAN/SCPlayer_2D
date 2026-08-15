@@ -16,5 +16,6 @@ void *video_decode_thread(void *arg);
 void video_refresh_timer(void *userdata);
 double get_video_clock(SCPlayer *scp);
 void video_dscpplay(SCPlayer *scp);
+int video_hist_display_once(SCPlayer *scp);
 
 #endif /* SCPlayer_video_h */

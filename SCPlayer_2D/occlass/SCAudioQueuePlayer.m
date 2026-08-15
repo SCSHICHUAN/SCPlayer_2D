@@ -61,6 +61,7 @@ static void OutputBufferCallback(void *inUserData, AudioQueueRef inAQ, AudioQueu
     }
 
     /* 水位插值/对齐只走 flag 2（wrote）；两次写入之间由内核线性消耗 */
+    /* 解耦：此处只拿指针拷贝，不调用解码；PCM 由 audion_queue_call_other 产出 */
 
     uint8_t *pcm = NULL;
     int pcmSize = 0;

@@ -22,7 +22,11 @@
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <math.h>
 #include "Public.h"
+
+typedef struct SCAudioPLC SCAudioPLC;
+typedef struct SCVideoHist SCVideoHist;
 
 
 
@@ -35,9 +39,19 @@ enum {
   AV_SYNC_EXTERNAL_MASTER,
 };
 
+/* 高低延时（与 sync 分开）：低延时才启用 A/V 丢包补偿 */
+typedef enum SCLatencyMode {
+    SC_LATENCY_LOW = 0,  /* 低延时：EXTERNAL + 音/视频补偿 */
+    SC_LATENCY_HIGH = 1, /* 高延时：AUDIO_MASTER，不做补偿 */
+} SCLatencyMode;
+
 extern int av_sync_type;
 void set_av_sync_type(int type);
 int get_av_sync_type(void);
+
+extern SCLatencyMode sc_latency_mode;
+void set_latency_mode(SCLatencyMode mode);
+SCLatencyMode get_latency_mode(void);
 
 
 
@@ -110,6 +124,7 @@ typedef struct SCPlayer{
 
     //音视频同步相关
     int av_sync_type;
+    SCLatencyMode   latency_mode; /* SC_LATENCY_LOW/HIGH；补帧只在 LOW，见 README §9 */
     int realtime;
 
     /* 外部钟（ms）：external_pts = now - 铆点；未钉住铆点为 NAN */
@@ -117,6 +132,11 @@ typedef struct SCPlayer{
 
     double          audio_clock;      // 上次 wrote 重置时的 pts（ms）
     double          audio_frame_pts;  // 最近解码帧 pts（ms）；wrote 时才写入 audio_clock
+    double          audio_compensation_pts; /* 低延时音频补帧累计(ms)；真实包 pts 加上；勿与视频交叉 */
+    double          video_compensation_pts; /* 低延时视频补帧累计(ms)；真实帧 pts 加上；勿与音频交叉 */
+    int             video_displayed_once; /* 1=已从 pictq 送显；暖机条件之一 */
+    int             video_no_hist_until_catchup; /* 1=仅V暂停→播放：video pts≥audio 前禁止补帧；0=平常满5s即可补 */
+    double          compensate_warm_start_ms; /* 首次真实播放墙钟；NAN=未开播；满 SC_COMPENSATE_WARM_MS 才补帧 */
     /* 当前写入 AQ 的这一包 PCM：时钟 = pts + 本包内已播时长(钳在 0~本包时长) */
     double          audio_pkt_wall_ms;     /* 本包 wrote 时的墙钟（ms） */
     unsigned int    audio_pkt_bytes;      /* 本包字节数 → 本包时长 */
@@ -139,6 +159,7 @@ typedef struct SCPlayer{
     AVCodecContext  *audio_ctx;      //音频的解码环境
     PacketQueue     audioq;          //音频的队列
     uint8_t         *audio_buf;      // 解码后到音频数据
+    unsigned int    audio_buf_alloc; // audio_buf 实际分配字节（供 av_fast_malloc）
     unsigned int    audio_buf_size;  // 当前软件缓冲字节数
     unsigned int    audio_buf_cursor; // 本帧已交给 AudioQueue 的字节数
     AVFrame         audio_frame;     //音频的frame
@@ -151,6 +172,8 @@ typedef struct SCPlayer{
     AVFilterContext *audio_buffersrc_ctx;     // 输入：S16 PCM 送入 atempo
     AVFilterContext *audio_buffersink_ctx;    // 输出：压短后的 S16
     double           audio_filter_tempo;      // 当前 tempo（>1 加快；与图不一致则重建）
+    /* 无包补偿：最近 10 个已解码帧历史栈（反向取帧） */
+    SCAudioPLC     *audio_plc;
     AudioInfo       audioInfo;       //音频参数
 
     // 视频
@@ -161,6 +184,7 @@ typedef struct SCPlayer{
     AVPacket        video_pkt;  //视频pkt
     struct SwsContext *sws_ctx; //视频重采样
     FrameQueue      pictq;      //储存解码后的视频帧
+    SCVideoHist    *video_hist; /* 最近已解码帧历史，无 pictq 时补显 */
     int width, height, xleft, ytop;//视频在SDL窗口位置和大小
     double         delay_video_time; // 刷新线程休眠时长（ms）
     double         frame_duration;//视频帧持续时间（ms）
@@ -188,6 +212,25 @@ typedef struct SCPlayer{
     //音视频同步测试
     int vidoe_stop; /* 1=视频暂停(刷新线程休眠), 0=播；暂停分支也必须查 quit，见 video_refresh_loop */
 }SCPlayer;
+
+/* 1=低延时：允许音/视频丢包补偿；高延时路径勿调用补偿逻辑 */
+static inline int sc_av_compensate_enabled(const SCPlayer *scp) {
+    return scp && scp->latency_mode == SC_LATENCY_LOW;
+}
+
+/* 开播暖机：自首次真实播放起满 SC_COMPENSATE_WARM_MS(5s) 才允许 A/V 补帧（README §9.2） */
+#define SC_COMPENSATE_WARM_MS 5000.0
+static inline void sc_compensate_warm_mark_playing(SCPlayer *scp) {
+    if (scp && isnan(scp->compensate_warm_start_ms)) {
+        scp->compensate_warm_start_ms = av_gettime_ms();
+    }
+}
+static inline int sc_compensate_warm_done(const SCPlayer *scp) {
+    if (!scp || isnan(scp->compensate_warm_start_ms)) {
+        return 0;
+    }
+    return (av_gettime_ms() - scp->compensate_warm_start_ms) >= SC_COMPENSATE_WARM_MS;
+}
 
 int scplayer(const char *filename, Player_call_other player_call_other, void *userData);//同步好的视频帧
 /* 停止并释放一次播放（切换片源前调用） */

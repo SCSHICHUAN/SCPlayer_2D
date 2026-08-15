@@ -326,6 +326,7 @@ SCPlayer_2D/
 | 换片 | `scplayer_stop` 停旧实例；`clearDisplay` 清黑屏；避免旧帧/旧 busy 残留 |
 | 暂停+换片 | `video_refresh_loop` 先查 `quit` 再处理 `vidoe_stop`，避免 `join` 死锁（§7.2） |
 | 冷启动音频 | `warmUpAudioSession` 进播前激活 session，消首播爆破音（§7.1） |
+| 高低延时 | `SCLatencyMode` + 补帧暖机 5s / V 暂停追赶门闩，见 **§9** |
 | 旋转 | 读流 `displaymatrix` / `rotate` → `video_rotate` → `SCRender.rotateDegrees` |
 | 网络 | `avformat_network_init`；支持 URL 播放；Info.plist 放开 ATS |
 
@@ -379,3 +380,85 @@ ffmpeg -re -stream_loop -1 -i "/path/to/video.mp4" \
 
 播放地址示例：`rtmp://<局域网IP>/live/desktop`  
 （桌面采屏推流需给「终端」开 macOS 屏幕录制权限，否则可能被 `killed`。）
+
+---
+
+## 9. 高低延时与 A/V 补帧
+
+UI「低延时 / 高延时」写入 `scp->latency_mode`（`SCLatencyMode`），并映射同步类型；**补偿逻辑只认 `latency_mode`，高延时路径不跑补帧。**
+
+| UI | `latency_mode` | `av_sync_type` | A/V 历史补帧 |
+|----|----------------|----------------|--------------|
+| 低延时 | `SC_LATENCY_LOW` | `AV_SYNC_EXTERNAL_MASTER` | 有（暖机后） |
+| 高延时 | `SC_LATENCY_HIGH` | `AV_SYNC_AUDIO_MASTER` | **无**（无包填静音 / pictq 空只等） |
+
+入口：`set_latency_mode()`；运行时以 `sc_av_compensate_enabled(scp)` 为准。
+
+### 9.1 低延时时钟关系
+
+低延时不是「音视频都直接跟墙钟」，而是：
+
+```text
+外部钟（墙钟铆点）
+    ↓ 纠偏 / 加速消耗积压
+音频（跟外部钟）
+    ↓ get_audio_clock
+视频（跟音频钟）
+```
+
+| 时钟 | 含义 |
+|------|------|
+| `external` | 首次音频 `wrote` 时钉墙钟铆点；`get = now − 铆点`；之后不被音频反复拉回 |
+| `audio` | `get_audio_clock = audio_clock + 本包已播时长`（wrote 重置基点） |
+| `video` | 刷新时 `diff = 视频帧 pts − get_audio_clock()`，再 `delay ≈ max(0, diff)` |
+
+要点：**外部钟只给音频纠偏用；视频始终认音频钟**。音频补偿与视频补偿**互不交叉累加**（避免双计）。
+
+### 9.2 开播暖机（5 秒）
+
+自**首次真实播放**起算墙钟（首次低延时 `wrote` 或首次 `pictq` 送显钉 `compensate_warm_start_ms`）：
+
+- **未满 `SC_COMPENSATE_WARM_MS`（5000ms）**：不补帧、不累加 `audio/video_compensation_pts`；音频侧返回 0 由上层填静音且不 `wrote`。
+- **满 5s 后**：才允许 PLC / 视频历史补帧（仍须已有历史、视频已送显过等条件）。
+
+避免开播阶段空队列被当成断流，把补偿从 0 抬高。
+
+### 9.3 音频补帧（仅低延时）
+
+触发：`audio_decode_frame_external` 在 `audioq` 空 / 取包失败 → `audio_reuse_last_buf`。
+
+1. **有积压**：按 `audioq` 深度（MB）+ `atempo` 变速不变调加速消耗（tempo 约 0.5～2.0）。
+2. **无包且暖机完成**：从 PCM **历史栈**（约 60 槽≈1s）从新到旧取帧，样点时间反转；**历史用尽后静音**，仍累加 `audio_compensation_pts`。
+3. **`audio_compensation_pts`**：之后真实包 `pts += compensation`，防钟回跳导致视频停。
+4. **高延时**：`audio_decode_frame_audio`，无包上层静音，无 PLC / 无补偿。
+
+### 9.4 视频补帧（仅低延时）
+
+触发：`video_refresh_timer_external_clock` 在 `pictq.size==0` → `video_hist_display_once`。
+
+1. 正常：解码入 `pictq`，同时 `sc_video_hist_rx`；入队 pts 含 `video_compensation_pts`。
+2. `pictq` 空且暖机完成：历史从新到旧克隆补显，累加 `video_compensation_pts`。
+3. **V 暂停中**：不补帧（`vidoe_stop`）。
+4. **V 暂停 → 再播放**（`video_no_hist_until_catchup`）：仅当 **视频 pts ≥ 音频钟** 后才再允许补帧；追上前只追真实 `pictq`，防止狂补时间。  
+   **未做该测试时标志为 0**，暖机后照常补帧（不要用「平常也要求 video≥audio」否则送显后几乎永补不了）。
+5. **高延时**：`video_refresh_timer_audio_clock`，空队列只 `delay=1` 再探，无 hist。
+
+### 9.5 视频刷新循环
+
+```text
+video_refresh_loop（独立 pthread）
+  for (;;) {
+      if (quit) break;
+      if (vidoe_stop) { sleep 10ms; continue; }   // 只停画面，每轮仍查 quit
+      video_refresh_timer(scp);                  // 按 latency_mode 分高/低路径
+      sc_delay_ms(delay_video_time);
+  }
+```
+
+| 点 | 说明 |
+|----|------|
+| 自己控节奏 | `delay_video_time` 由上一轮 pts vs 音频钟（或补帧时的 `frame_duration`）决定 |
+| 与解码 / 渲染分离 | 解码填 `pictq`；刷新 clone 送 GL 后立刻出队 |
+| 暂停 | `vidoe_stop` 分支也必须查 `quit`，否则换片 `join` 会死锁（见 §7.2） |
+
+一句话：**低延时 = 外部钟纠音频、音频钟带视频 + 暖机 5s 后才 A/V 补帧；高延时 = 经典 AUDIO_MASTER，无补帧。**

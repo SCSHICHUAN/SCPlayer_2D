@@ -23,6 +23,9 @@
 #import "SCAudioQueuePlayer.h"
 #import "SCDropdownButton.h"
 #import "SCPlayer_audio.h"
+#include "SCPlayer_PLC.h"
+#include "SCPlayer_VHist.h"
+#include "SCPlayer_sync.h"
 
 static NSString * const kSCLastPlayURLKey = @"SCPlayer.lastPlayURL";
 static NSString * const kSCQualityKey = @"SCPlayer.quality";
@@ -80,7 +83,7 @@ static void SCSaveHighLatency(BOOL high) {
     [ud synchronize];
 }
 static void SCApplyLatencyMode(BOOL high) {
-    set_av_sync_type(high ? AV_SYNC_AUDIO_MASTER : AV_SYNC_EXTERNAL_MASTER);
+    set_latency_mode(high ? SC_LATENCY_HIGH : SC_LATENCY_LOW);
 }
 
 @interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate>
@@ -108,6 +111,7 @@ static void SCApplyLatencyMode(BOOL high) {
 @property(nonatomic,assign)BOOL controlsVisible;
 @property(nonatomic,assign)SCPlayer *playingIs;
 @property(nonatomic,strong)UITextView *diffTextView;
+@property(nonatomic,strong)UILabel *compensateLabel;
 @property(nonatomic,strong)NSMutableArray<NSString *> *diffLines;
 @property(nonatomic,strong)NSTimer *keepAwakeTimer;
 -(void)initAudio:(void *)opaque;
@@ -139,8 +143,13 @@ static void SCApplyLatencyMode(BOOL high) {
 -(CGFloat)fittingWidthForButtonTitle:(NSString *)title;
 -(void)buildControls;
 -(void)buildDiffTextView;
+-(void)buildCompensateLabel;
+-(NSString *)formatCompensateMs:(double)ms;
+-(NSString *)compensateLineWithA:(double)aCompMs v:(double)vCompMs;
+-(void)updateCompensateLabelA:(double)aCompMs v:(double)vCompMs;
 -(void)appendDiffLog:(double)diffMs renderMS:(double)renderMS
-             videoMB:(double)videoMB audioMB:(double)audioMB;
+             videoMB:(double)videoMB audioMB:(double)audioMB
+              aCompMs:(double)aCompMs vCompMs:(double)vCompMs;
 -(void)clearDiffLog;
 -(void)toggleControlsVisibility;
 -(void)onCenterTap:(UITapGestureRecognizer *)gr;
@@ -153,7 +162,7 @@ static void SCApplyLatencyMode(BOOL high) {
 @implementation ViewController
 
 
-//音频设备要数据
+/* 音频设备要数据（解耦桥：设备问 PCM，播放器只填 *outPCM/*outSize，不碰 AQ） */
 int audion_queue_call_other(void *userData, int flag, int len,
                             uint8_t **outPCM, int *outSize) {
     SCPlayer *scp = (SCPlayer *)userData;
@@ -161,23 +170,22 @@ int audion_queue_call_other(void *userData, int flag, int len,
         return -1;
     }
     if (flag == 0) {
-        /* 解码取 PCM；EXTERNAL 无包时由 audio 侧复用上一盒，不再填静音 */
-        if (scp->av_sync_type != AV_SYNC_EXTERNAL_MASTER &&
+        /* 解码取 PCM；低延时无包由 audio 侧补偿，高延时无包填静音 */
+        if (scp->latency_mode != SC_LATENCY_LOW &&
             scp->audioq.nb_packets <= 0) {
-            return 1; /* 暂无：上层填静音 */
+            return 1; /* 高延时暂无：上层填静音 */
         }
         audio_decode_callback(scp, NULL, 0);//需要数据
         if (!scp->audio_buf || scp->out_audio_size <= 0) {
-            if (scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER) {
-                return 1; /* 尚无上一盒：静音占位 */
-            }
-            return -1; /* 结束 */
+            /* 高/低延时：暂无都填静音，避免偶发无帧把 AQ 停死 */
+            return 1;
         }
+        /* 只交出自有缓冲地址，由设备层 memcpy；所有权仍在 scp->audio_buf */
         if (outPCM) {
-            *outPCM = scp->audio_buf;//音频数据赋值
+            *outPCM = scp->audio_buf;
         }
         if (outSize) {
-            *outSize = scp->out_audio_size;//赋值
+            *outSize = scp->out_audio_size;
         }
         return 0;
     }
@@ -225,12 +233,15 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         double diffMs = scp->delay_video_time;
         double videoMB = scp->videoq.size / (1024.0 * 1024.0);
         double audioMB = scp->audioq.size / (1024.0 * 1024.0);
+        double aCompMs = sc_av_compensate_enabled(scp) ? scp->audio_compensation_pts : 0;
+        double vCompMs = sc_av_compensate_enabled(scp) ? scp->video_compensation_pts : 0;
         [vc.cRender displayWithFrame:frame bb:^(BOOL success) {
             (void)success;
             double renderMS = vc.cRender.lastrenderMS;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (vc.playingIs == scp) {
-                    [vc appendDiffLog:diffMs renderMS:renderMS videoMB:videoMB audioMB:audioMB];
+                    [vc appendDiffLog:diffMs renderMS:renderMS videoMB:videoMB audioMB:audioMB
+                              aCompMs:aCompMs vCompMs:vCompMs];
                 }
             });
             AVFrame *owned = frame;
@@ -304,6 +315,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     self.audioPlayer = nil;
     self.cRender.rotateDegrees = 0;
     [self.cRender clearDisplay];
+    [self clearDiffLog];
     [self updateAllPauseButtonTitles];
     /* 停播后恢复系统自动锁屏 */
     [self setScreenKeepAwake:NO];
@@ -408,7 +420,30 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     SCSaveHighLatency(self.highLatencyMode);
     SCApplyLatencyMode(self.highLatencyMode);
     if (self.playingIs) {
+        self.playingIs->latency_mode = get_latency_mode();
         self.playingIs->av_sync_type = get_av_sync_type();
+        if (self.playingIs->latency_mode == SC_LATENCY_HIGH) {
+            /* 切到高延时：关掉补偿，不碰 AUDIO_MASTER 同步逻辑 */
+            self.playingIs->audio_compensation_pts = 0;
+            self.playingIs->video_compensation_pts = 0;
+            sc_audio_plc_destroy(self.playingIs->audio_plc);
+            self.playingIs->audio_plc = NULL;
+            sc_video_hist_destroy(self.playingIs->video_hist);
+            self.playingIs->video_hist = NULL;
+            external_clock_init(self.playingIs); /* 清铆点，避免残留 */
+            [self updateCompensateLabelA:0 v:0];
+        } else {
+            /* 切回低延时：重建补偿栈，重新铆 external（下次 wrote） */
+            if (!self.playingIs->audio_plc) {
+                self.playingIs->audio_plc = sc_audio_plc_create();
+            }
+            if (!self.playingIs->video_hist) {
+                self.playingIs->video_hist = sc_video_hist_create();
+            }
+            self.playingIs->audio_compensation_pts = 0;
+            self.playingIs->video_compensation_pts = 0;
+            external_clock_init(self.playingIs);
+        }
     }
     [self updateLatencyButtonTitle];
     self.lab.text = self.highLatencyMode ? @"延时: 高延时" : @"延时: 低延时";
@@ -452,8 +487,16 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         self.lab.text = @"当前没有在播的视频";
         return;
     }
-    /* 1=视频暂停（音频继续），0=视频播放 */
-    scp->vidoe_stop = scp->vidoe_stop ? 0 : 1;
+    /* 1=视频暂停（音频可继续），0=视频播放 */
+    int next = scp->vidoe_stop ? 0 : 1;
+    scp->vidoe_stop = next;
+    /*
+     仅「V 停 + A 仍播」置 video_no_hist_until_catchup：
+     恢复后须 video pts≥audio 才再补帧。平常播放勿置位，否则会误拦补帧（README §9.4）。
+     */
+    if (next == 1 && !self.audioPaused && sc_av_compensate_enabled(scp)) {
+        scp->video_no_hist_until_catchup = 1;
+    }
     [self updateAllPauseButtonTitles];
 }
 
@@ -797,6 +840,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [self updateLatencyButtonTitle];
     [self updateAllPauseButtonTitles];
     [self buildDiffTextView];
+    [self buildCompensateLabel];
 }
 
 -(void)buildDiffTextView{
@@ -827,21 +871,83 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     ]];
 }
 
+-(void)buildCompensateLabel{
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    lab.textColor = [UIColor colorWithRed:1 green:0.85 blue:0.35 alpha:1];
+    lab.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
+    lab.textAlignment = NSTextAlignmentLeft;
+    lab.numberOfLines = 1;
+    lab.layer.cornerRadius = 6;
+    lab.clipsToBounds = YES;
+    lab.text = @"";
+    lab.hidden = YES;
+    /* 左右内边距用空格近似；高度单行 */
+    self.compensateLabel = lab;
+
+    [self.view addSubview:lab];
+    [self.view bringSubviewToFront:lab];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [lab.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [lab.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [lab.bottomAnchor constraintEqualToAnchor:self.diffTextView.topAnchor constant:-8],
+        [lab.heightAnchor constraintEqualToConstant:28],
+    ]];
+}
+
+/* >1000ms 用秒保留 2 位，否则毫秒 2 位 */
+-(NSString *)formatCompensateMs:(double)ms{
+    if (ms > 1000.0) {
+        return [NSString stringWithFormat:@"%.3fs", ms / 1000.0];
+    }
+    return [NSString stringWithFormat:@"%.3fms", ms];
+}
+
+-(NSString *)compensateLineWithA:(double)aCompMs v:(double)vCompMs{
+    NSMutableString *comp = [NSMutableString stringWithString:@" "];
+    if (aCompMs > 0.0) {
+        [comp appendFormat:@"[A-compensate] %@", [self formatCompensateMs:aCompMs]];
+    }
+    if (vCompMs > 0.0) {
+        if (comp.length > 1) {
+            [comp appendString:@"  "];
+        }
+        [comp appendFormat:@"[V-compensate] %@", [self formatCompensateMs:vCompMs]];
+    }
+    [comp appendString:@" "];
+    return comp;
+}
+
+-(void)updateCompensateLabelA:(double)aCompMs v:(double)vCompMs{
+    if (!self.compensateLabel) {
+        return;
+    }
+    /* 仅 UI，不打印 */
+    if (aCompMs > 0.0 || vCompMs > 0.0) {
+        self.compensateLabel.text = [self compensateLineWithA:aCompMs v:vCompMs];
+        self.compensateLabel.hidden = NO;
+    } else {
+        self.compensateLabel.text = @"";
+        self.compensateLabel.hidden = YES;
+    }
+}
+
 -(void)appendDiffLog:(double)diffMs renderMS:(double)renderMS
-             videoMB:(double)videoMB audioMB:(double)audioMB{
+             videoMB:(double)videoMB audioMB:(double)audioMB
+              aCompMs:(double)aCompMs vCompMs:(double)vCompMs{
     if (!self.diffTextView) {
         return;
     }
     if (!self.diffLines) {
         self.diffLines = [NSMutableArray array];
     }
-    /* 精简一行：同步差 | 渲染耗时 | 音视频包缓存 */
-    NSString *line = [NSString stringWithFormat:
-                      @"diff:%.1fms render:%.1fms video:%.2fMB audio:%fMB",
+    NSString *base = [NSString stringWithFormat:
+                      @"diff:%.1fms render:%.1fms video:%.4fMB audio:%.4fMB",
                       diffMs, renderMS, videoMB, audioMB];
-    av_log(NULL, AV_LOG_INFO, "diff:%.1fms render:%.1fms video:%.2fMB audio:%fMB \n",
-           diffMs, renderMS, videoMB, audioMB);
-    [self.diffLines addObject:line];
+    /* 显示：diff 区不含时间偏移；补偿只在上方 label */
+    [self.diffLines addObject:base];
     while (self.diffLines.count > 100) {
         [self.diffLines removeObjectAtIndex:0];
     }
@@ -850,11 +956,23 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     if (len > 0) {
         [self.diffTextView scrollRangeToVisible:NSMakeRange(len - 1, 1)];
     }
+    [self updateCompensateLabelA:aCompMs v:vCompMs];
+
+    /* 打印：一行 = base，有补偿再拼上 */
+    if (aCompMs > 0.0 || vCompMs > 0.0) {
+        av_log(NULL, AV_LOG_INFO, "%s%s\n",
+               base.UTF8String,
+               [self compensateLineWithA:aCompMs v:vCompMs].UTF8String);
+    } else {
+        av_log(NULL, AV_LOG_INFO, "%s \n", base.UTF8String);
+    }
 }
 
 -(void)clearDiffLog{
     [self.diffLines removeAllObjects];
     self.diffTextView.text = @"";
+    self.compensateLabel.text = @"";
+    self.compensateLabel.hidden = YES;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -874,6 +992,7 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
     [UIView animateWithDuration:0.2 animations:^{
         self.controlsBar.alpha = self.controlsVisible ? 1.0 : 0.0;
         self.diffTextView.alpha = self.controlsVisible ? 1.0 : 0.0;
+        self.compensateLabel.alpha = self.controlsVisible ? 1.0 : 0.0;
     }];
     self.controlsBar.userInteractionEnabled = self.controlsVisible;
     self.diffTextView.userInteractionEnabled = self.controlsVisible;
@@ -896,6 +1015,10 @@ int when_frame_push(AVFrame *frame, int flag, void *opaque, void *userData){
         return;
     }
     if (self.controlsVisible && CGRectContainsPoint(self.diffTextView.frame, p)) {
+        return;
+    }
+    if (self.controlsVisible && self.compensateLabel && !self.compensateLabel.hidden
+        && CGRectContainsPoint(self.compensateLabel.frame, p)) {
         return;
     }
     [self toggleControlsVisibility];

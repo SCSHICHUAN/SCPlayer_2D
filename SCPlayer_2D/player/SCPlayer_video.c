@@ -7,8 +7,18 @@
 //
 
 #include "SCPlayer_video.h"
+#include "SCPlayer_VHist.h"
+#include "SCPlayer_audio.h"
 #include <math.h>
 #include <libavutil/hwcontext.h>
+
+/* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
+static inline double sc_video_frame_ms(const SCPlayer *scp) {
+    if (scp && scp->frame_duration > 0) {
+        return scp->frame_duration;
+    }
+    return SC_DEFAULT_FRAME_DURATION_MS;
+}
 
 //推算pts 因为有时会没有pts
 static double synchronize_video(SCPlayer *scp,AVFrame *sec_frame,double pts){
@@ -57,6 +67,10 @@ static int queue_pitcure(SCPlayer *scp,AVFrame *src_frame,
      这在处理视频和音频帧时非常有用，因为它可以有效地管理和转移帧数据，而无需进行数据的深度复制。
      */
     av_frame_move_ref(vp->frame,src_frame);//保持视频帧数据
+    /* 压入历史，供 pictq 空时补显（仅低延时） */
+    if (sc_av_compensate_enabled(scp) && scp->video_hist) {
+        sc_video_hist_rx(scp->video_hist, vp->frame, pts, duration);
+    }
     frame_queue_push(&scp->pictq);
     return 0;
 }
@@ -202,6 +216,9 @@ void *video_decode_thread(void *arg){
             //视频帧呈现时间（ms）
             pts = (frame_for_queue->pts == AV_NOPTS_VALUE) ? NAN : sc_ts_to_ms(frame_for_queue->pts, tb);
             pts = synchronize_video(scp,frame_for_queue,pts);//计算video clock 视频的播放时长，当前的video_clock + 1/tbr(帧率)
+            if (!isnan(pts) && sc_av_compensate_enabled(scp)) {
+                pts += scp->video_compensation_pts;
+            }
             
             /*
              insert FrameQueue kt_pos: 这是一个 64 位的整数，
@@ -239,6 +256,7 @@ double get_video_clock(SCPlayer *scp){
 void video_dscpplay(SCPlayer *scp){
     Frame *vp;
     AVFrame *owned;
+    double disp_pts;
 
     if (scp->pictq.size == 0 || !scp->player_call_other) {
         return;
@@ -255,13 +273,88 @@ void video_dscpplay(SCPlayer *scp){
     if (!vp || !vp->frame) {
         return;
     }
+    disp_pts = vp->pts;
     owned = av_frame_clone(vp->frame);
     fream_queue_pop(&scp->pictq);
     if (!owned) {
         return;
     }
+    /* 记下真实送显 pts；仅 V 暂停追赶标志用 */
+    if (!isnan(disp_pts)) {
+        scp->frame_last_pts = disp_pts;
+        scp->video_current_pts = disp_pts;
+        scp->video_current_pts_time = av_gettime_ms();
+        /* V暂停→播放：视频追上音频后才允许再补帧 */
+        if (scp->video_no_hist_until_catchup) {
+            double a = get_audio_clock(scp);
+            if (!isnan(a) && disp_pts >= a) {
+                scp->video_no_hist_until_catchup = 0;
+            }
+        }
+    }
     scp->display_busy = 1;
     scp->player_call_other(owned, 1, scp, scp->userData);//呼叫渲染模块
+    scp->video_displayed_once = 1;
+    if (sc_av_compensate_enabled(scp)) {
+        sc_compensate_warm_mark_playing(scp);
+    }
+}
+
+/* pictq 空：低延时历史补显 + 累计 video_compensation_pts */
+int video_hist_display_once(SCPlayer *scp)
+{
+    AVFrame *owned = NULL;
+    double pts_ms = NAN;
+    double dur_ms = 0;
+    double audio_pts;
+    double video_pts;
+
+    /* 高延时：不补帧 */
+    if (!scp || !sc_av_compensate_enabled(scp) || !scp->video_hist || !scp->player_call_other) {
+        return 0;
+    }
+    if (scp->vidoe_stop || scp->display_busy || scp->quit) {
+        return 0;
+    }
+    /* 暖机：送显过 + 有历史 + 播放满 5s */
+    if (!scp->video_displayed_once || sc_video_hist_count(scp->video_hist) <= 0 ||
+        !sc_compensate_warm_done(scp)) {
+        return 0;
+    }
+    /*
+     仅 V暂停→播放 追赶：未追上（video pts < audio）不补；
+     video_no_hist_until_catchup==0 时（无此测试）不进本分支。
+     */
+    if (scp->video_no_hist_until_catchup) {
+        audio_pts = get_audio_clock(scp);
+        video_pts = scp->frame_last_pts;
+        if (isnan(audio_pts) || isnan(video_pts) || video_pts < audio_pts) {
+            return 0;
+        }
+        scp->video_no_hist_until_catchup = 0; /* pts >= audio，开始允许补帧 */
+    }
+    if (!sc_video_hist_fill(scp->video_hist, &owned, &pts_ms, &dur_ms)) {
+        return 0;
+    }
+    (void)pts_ms;
+    if (dur_ms <= 0) {
+        dur_ms = sc_video_frame_ms(scp);
+    }
+    scp->video_compensation_pts += dur_ms;
+    pts_ms = get_audio_clock(scp);
+    if (isnan(pts_ms)) {
+        pts_ms = scp->frame_last_pts;
+        if (isnan(pts_ms)) {
+            pts_ms = 0;
+        }
+        pts_ms += dur_ms;
+    }
+    scp->frame_last_pts = pts_ms;
+    scp->video_current_pts = pts_ms;
+    scp->video_current_pts_time = av_gettime_ms();
+    scp->display_busy = 1;
+    scp->player_call_other(owned, 1, scp, scp->userData);
+    return 1;
 }
 
 /* 视频落后超过约 1s 开始狂追 */
@@ -290,27 +383,15 @@ static void video_drop_late_frames(SCPlayer *scp, double frame_ms)
     }
 }
 
-/* 同步用的帧间隔：优先用已算出的 frame_duration，否则默认 */
-static inline double sc_video_frame_ms(const SCPlayer *scp) {
-    if (scp && scp->frame_duration > 0) {
-        return scp->frame_duration;
-    }
-    return SC_DEFAULT_FRAME_DURATION_MS;
-}
-
-
-
-
-
-//刷新视频帧
+//刷新视频帧：按 latency_mode 分派（低→EXTERNAL+可补帧；高→AUDIO、无补帧）
 void video_refresh_timer(void *userdata){
 
     SCPlayer *scp = (SCPlayer*)userdata;
-    
-    if(scp->av_sync_type == AV_SYNC_AUDIO_MASTER){
-        video_refresh_timer_audio_clock(userdata);
-    } else if(scp->av_sync_type == AV_SYNC_EXTERNAL_MASTER){
+
+    if (scp->latency_mode == SC_LATENCY_LOW) {
         video_refresh_timer_external_clock(userdata);
+    } else {
+        video_refresh_timer_audio_clock(userdata);
     }
     
    

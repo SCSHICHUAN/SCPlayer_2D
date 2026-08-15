@@ -10,6 +10,8 @@
 #include "SCPlayer_audio.h"
 #include "SCPlayer_video.h"
 #include "SCPlayer_sync.h"
+#include "SCPlayer_VHist.h"
+#include "SCPlayer_PLC.h"
 #include <string.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
@@ -46,6 +48,7 @@ __attribute__((used)) static const void *const sc_force_link_atempo[] = {
 };
 
 int av_sync_type = AV_SYNC_EXTERNAL_MASTER;
+SCLatencyMode sc_latency_mode = SC_LATENCY_LOW;
 
 void set_av_sync_type(int type) {
     if (type != AV_SYNC_AUDIO_MASTER &&
@@ -58,6 +61,20 @@ void set_av_sync_type(int type) {
 
 int get_av_sync_type(void) {
     return av_sync_type;
+}
+
+void set_latency_mode(SCLatencyMode mode) {
+    if (mode != SC_LATENCY_LOW && mode != SC_LATENCY_HIGH) {
+        mode = SC_LATENCY_LOW;
+    }
+    sc_latency_mode = mode;
+    /* 低延时→EXTERNAL；高延时→AUDIO；不混用补偿 */
+    set_av_sync_type(mode == SC_LATENCY_HIGH ? AV_SYNC_AUDIO_MASTER
+                                             : AV_SYNC_EXTERNAL_MASTER);
+}
+
+SCLatencyMode get_latency_mode(void) {
+    return sc_latency_mode;
 }
 
 /*
@@ -634,8 +651,10 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             }
             scp->audio_buf_size = 0;
             scp->audio_buf_cursor = 0;
+            scp->audio_buf_alloc = 0;
             scp->audio_clock = NAN;
             scp->audio_frame_pts = NAN;
+            scp->audio_compensation_pts = 0;
             scp->audio_st = st;
             scp->audio_index = stream_index;
             scp->audio_ctx = avctx;
@@ -658,6 +677,21 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             scp->display_busy = 0;
             scp->video_rotate = sc_get_stream_rotation(st);
             scp->video_current_pts_time = av_gettime_ms();//记下 pts 时的墙钟（ms）
+            scp->video_compensation_pts = 0;
+            scp->video_displayed_once = 0;
+            scp->video_no_hist_until_catchup = 0;
+            scp->compensate_warm_start_ms = NAN;
+            /* 视频历史补显仅低延时 */
+            if (sc_av_compensate_enabled(scp)) {
+                if (!scp->video_hist) {
+                    scp->video_hist = sc_video_hist_create();
+                } else {
+                    sc_video_hist_reset(scp->video_hist);
+                }
+            } else {
+                sc_video_hist_destroy(scp->video_hist);
+                scp->video_hist = NULL;
+            }
             av_log(NULL, AV_LOG_INFO, "video frame_duration=%.3f ms rotate=%d\n",
                    scp->frame_duration, scp->video_rotate);
             
@@ -826,6 +860,8 @@ static void stream_component_close(SCPlayer *scp, int stream_index){
             swr_free(&scp->audio_swr_ctx);
             av_freep(&scp->audio_buf);
             scp->audio_buf = NULL;
+            scp->audio_buf_alloc = 0;
+            scp->audio_compensation_pts = 0;
 
             break;
         case AVMEDIA_TYPE_VIDEO:
@@ -839,6 +875,12 @@ static void stream_component_close(SCPlayer *scp, int stream_index){
                 sws_freeContext(scp->sws_ctx);
                 scp->sws_ctx = NULL;
             }
+            sc_video_hist_destroy(scp->video_hist);
+            scp->video_hist = NULL;
+            scp->video_compensation_pts = 0;
+            scp->video_displayed_once = 0;
+            scp->video_no_hist_until_catchup = 0;
+            scp->compensate_warm_start_ms = NAN;
             scp->hw_video = 0;
             break;
         default:
@@ -857,6 +899,17 @@ static void stream_close(SCPlayer *scp){
         stream_component_close(scp, scp->audio_index);
     if (scp->video_index >= 0)
         stream_component_close(scp, scp->video_index);
+
+    /* 换片/停播兜底：历史栈与累计补偿必须清空（防止某路未 open 残留） */
+    sc_audio_plc_destroy(scp->audio_plc);
+    scp->audio_plc = NULL;
+    scp->audio_compensation_pts = 0;
+    sc_video_hist_destroy(scp->video_hist);
+    scp->video_hist = NULL;
+    scp->video_compensation_pts = 0;
+    scp->video_displayed_once = 0;
+    scp->video_no_hist_until_catchup = 0;
+    scp->compensate_warm_start_ms = NAN;
     
     avformat_close_input(&scp->ic);
     packet_queue_destroy(&scp->videoq);
@@ -897,7 +950,9 @@ static SCPlayer *stream_open(const char* filename){
     }
     
     scp->av_sync_type = av_sync_type;
+    scp->latency_mode = sc_latency_mode;
     scp->realtime = 0;
+    scp->compensate_warm_start_ms = NAN;
     external_clock_init(scp);
     if(pthread_create(&scp->read_tid, NULL, read_thread, scp) != 0){
         av_log(NULL,AV_LOG_FATAL,"pthread_create(read_thread)\n");
