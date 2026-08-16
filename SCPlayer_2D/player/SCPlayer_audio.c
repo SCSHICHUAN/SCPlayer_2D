@@ -339,11 +339,9 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
     }
     
     /*
-     回置区间 [0.01 0.03] 不在灵界点来哈却换导致音频声音奇怪
-     如果队列小于0.01MB时就正常播放，一直保持这个速度让队列增长，
-     增长到0.03MB就开始加速让队列减少，一直保持这个速度让队列减少，
-     减少到0.01MB切回正常速度,
-     这里还可以优化,观察是否增长和减少
+     回差区间 [0.01, 0.03] MB：避免临界点来回切换导致声音怪异。
+     ≤0.01 → 原速，让队列涨；≥0.03 → 加速消耗；中间保持上一档 hysteresis_samples。
+     ≥0.05 → 更强加速（约 2× 上限）。
      */
     double audio_q_size = scp->audioq.size / (1024.0 * 1024.0);
     if (audio_q_size <= 0.01) {// 小于0.01MB 就按照 正常的数度一直播
@@ -358,11 +356,11 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
         scp->hysteresis_samples = 1;
     }
     
-    //纠偏后返回
-    if(scp->video_compensation_pts > 0){
+    /* 纠偏后回落：防止 compensation 只增不减导致音视频永远不同步 */
+    if (scp->video_compensation_pts > 0) {
         scp->video_compensation_pts -= 10;
     }
-    if(scp->audio_compensation_pts > 0){
+    if (scp->audio_compensation_pts > 0) {
         scp->audio_compensation_pts -= 10;
     }
 

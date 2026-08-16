@@ -327,6 +327,8 @@ SCPlayer_2D/
 | 暂停+换片 | `video_refresh_loop` 先查 `quit` 再处理 `vidoe_stop`，避免 `join` 死锁（§7.2） |
 | 冷启动音频 | `warmUpAudioSession` 进播前激活 session，消首播爆破音（§7.1） |
 | 高低延时 | `SCLatencyMode` + 补帧暖机 5s / V 暂停追赶门闩，见 **§9** |
+| 音频队列滞回 | `hysteresis_samples`：积压用回差区间，避免临界点来回切速度（§9.3） |
+| 补偿回落 | 纠偏时逐步扣减 A/V `compensation_pts`，防累计导致永不同步（§9.3） |
 | 旋转 | 读流 `displaymatrix` / `rotate` → `video_rotate` → `SCRender.rotateDegrees` |
 | 网络 | `avformat_network_init`；支持 URL 播放；Info.plist 放开 ATS |
 
@@ -423,14 +425,44 @@ UI「低延时 / 高延时」写入 `scp->latency_mode`（`SCLatencyMode`），�
 
 避免开播阶段空队列被当成断流，把补偿从 0 抬高。
 
-### 9.3 音频补帧（仅低延时）
+### 9.3 音频纠偏与补帧（仅低延时）
+
+#### 积压加速：滞回，避免临界点来回切换
+
+问题：队列深度在某个阈值（如 0.02MB）上下抖时，若每次回调都在「原速 / 加速」之间切换 → **atempo 来回切，声音怪异**（发闷、发飘、节奏发颤）。
+
+做法（`synchronize_audio_to_external` + `hysteresis_samples`）：用**回差带**，只在越过边界时改速度，区间内保持上一档：
+
+```text
+audioq 大小 (MB)
+  ≤ 0.01     → 原速（hysteresis = nb_samples），让队列慢慢涨
+  ≥ 0.03     → 约 +10% 加速（少吐 10%）
+  ≥ 0.05     → 约 +50% 加速（atempo 上限约 2×）
+  (0.01,0.03) → 不改档，沿用 hysteresis_samples
+```
+
+对应提交：`回置区间 [0.01 0.03] …` —— 解决临界点来回切换导致音视频听感/观感怪异。
+
+#### 补偿累计回落：防纠偏偏离
+
+问题：断流补帧把 `audio/video_compensation_pts` 抬高后，若一直加在真实 pts 上 → **时间轴被永久抬偏，音视频像永远对不齐**。
+
+做法：在每次外部纠偏路径里，若累计 > 0 则每次约减 10ms，逐步回到 0：
+
+```c
+/* 纠偏后回落，防止补偿导致永远不同步 */
+if (video_compensation_pts > 0) video_compensation_pts -= 10;
+if (audio_compensation_pts > 0) audio_compensation_pts -= 10;
+```
+
+对应提交：`fix:防止纠偏导致音视频永远不同步`。
+
+#### 无包补帧
 
 触发：`audio_decode_frame_external` 在 `audioq` 空 / 取包失败 → `audio_reuse_last_buf`。
 
-1. **有积压**：按 `audioq` 深度（MB）+ `atempo` 变速不变调加速消耗（tempo 约 0.5～2.0）。
-2. **无包且暖机完成**：从 PCM **历史栈**（约 60 槽≈1s）从新到旧取帧，样点时间反转；**历史用尽后静音**，仍累加 `audio_compensation_pts`。
-3. **`audio_compensation_pts`**：之后真实包 `pts += compensation`，防钟回跳导致视频停。
-4. **高延时**：`audio_decode_frame_audio`，无包上层静音，无 PLC / 无补偿。
+1. **无包且暖机完成**：PCM 历史栈（约 60 槽≈1s）从新到旧 + 样点反转；用尽后静音，仍可短暂累加 `audio_compensation_pts`（随后按上面回落）。
+2. **高延时**：`audio_decode_frame_audio`，无包上层静音，无 PLC / 无补偿。
 
 ### 9.4 视频补帧（仅低延时）
 
@@ -461,4 +493,11 @@ video_refresh_loop（独立 pthread）
 | 与解码 / 渲染分离 | 解码填 `pictq`；刷新 clone 送 GL 后立刻出队 |
 | 暂停 | `vidoe_stop` 分支也必须查 `quit`，否则换片 `join` 会死锁（见 §7.2） |
 
-一句话：**低延时 = 外部钟纠音频、音频钟带视频 + 暖机 5s 后才 A/V 补帧；高延时 = 经典 AUDIO_MASTER，无补帧。**
+### 9.6 最近两次提交（问题 → 解法）
+
+| 提交 | 现象 | 根因 | 解法 |
+|------|------|------|------|
+| `回置区间 [0.01 0.03]…` | 声音怪异（发颤/发闷），像音视频节奏不稳 | `audioq` 深度在临界点上下抖 → 原速/加速**来回切换**，atempo 跟着抖 | `hysteresis_samples` 回差：≤0.01MB 原速、≥0.03 加速；中间不改档 |
+| `fix:防止纠偏导致音视频永远不同步` | 补帧后纠偏偏离，音画像永远对不齐 | `audio/video_compensation_pts` **只增不减**，pts 被永久抬高 | 纠偏路径里每次把累计补偿约 **-10ms**，逐步回到 0 |
+
+一句话：**低延时 = 外部钟纠音频、音频钟带视频 + 暖机 5s 后补帧；积压用滞回防临界切换；补偿要回落防永久偏离。**
