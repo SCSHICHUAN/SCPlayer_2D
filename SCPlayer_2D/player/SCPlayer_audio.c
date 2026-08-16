@@ -357,6 +357,14 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
     if (scp->hysteresis_samples < 1) {
         scp->hysteresis_samples = 1;
     }
+    
+    //纠偏后返回
+    if(scp->video_compensation_pts > 0){
+        scp->video_compensation_pts -= 10;
+    }
+    if(scp->audio_compensation_pts > 0){
+        scp->audio_compensation_pts -= 10;
+    }
 
     
     /* 队列没消耗干净：直接最大加速 */
