@@ -51,9 +51,9 @@
 		F6C7552F2C5CCE23006EFCDF /* fragmentShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C7552E2C5CCE23006EFCDF /* fragmentShader.glsl */; };
 		F6C755312C5CCE2C006EFCDF /* vertexShader.glsl in Resources */ = {isa = PBXBuildFile; fileRef = F6C755302C5CCE2C006EFCDF /* vertexShader.glsl */; };
 		F6E4E52E303016300065FD5E /* SCPlayer_PLC.c in Sources */ = {isa = PBXBuildFile; fileRef = F6E4E52D303016300065FD5E /* SCPlayer_PLC.c */; };
-		F6VHIST02303016300065FD5E /* SCPlayer_VHist.c in Sources */ = {isa = PBXBuildFile; fileRef = F6VHIST01303016300065FD5E /* SCPlayer_VHist.c */; };
 		F6SPANPLC02303016300065FD /* plc.c in Sources */ = {isa = PBXBuildFile; fileRef = F6SPANPLC01303016300065FD /* plc.c */; };
 		F6SPANPLC04303016300065FD /* span_alloc_stub.c in Sources */ = {isa = PBXBuildFile; fileRef = F6SPANPLC03303016300065FD /* span_alloc_stub.c */; };
+		F6VHIST02303016300065FD5E /* SCPlayer_VHist.c in Sources */ = {isa = PBXBuildFile; fileRef = F6VHIST01303016300065FD5E /* SCPlayer_VHist.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -122,11 +122,11 @@
 		F6C755302C5CCE2C006EFCDF /* vertexShader.glsl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = vertexShader.glsl; sourceTree = "<group>"; };
 		F6E4E52C303016300065FD5E /* SCPlayer_PLC.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer_PLC.h; sourceTree = "<group>"; };
 		F6E4E52D303016300065FD5E /* SCPlayer_PLC.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer_PLC.c; sourceTree = "<group>"; };
-		F6VHIST00303016300065FD5E /* SCPlayer_VHist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer_VHist.h; sourceTree = "<group>"; };
-		F6VHIST01303016300065FD5E /* SCPlayer_VHist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer_VHist.c; sourceTree = "<group>"; };
 		F6SPANPLC01303016300065FD /* plc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = plc.c; sourceTree = "<group>"; };
 		F6SPANPLC03303016300065FD /* span_alloc_stub.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = span_alloc_stub.c; sourceTree = "<group>"; };
 		F6SPANPLC06303016300065FD /* config.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = config.h; sourceTree = "<group>"; };
+		F6VHIST00303016300065FD5E /* SCPlayer_VHist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SCPlayer_VHist.h; sourceTree = "<group>"; };
+		F6VHIST01303016300065FD5E /* SCPlayer_VHist.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SCPlayer_VHist.c; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -317,14 +317,14 @@
 				F68807DF2B5801F600BC579B /* Camera.h */,
 				F69FEC8C2C3BEB7B00ACFC92 /* SCPlayer.h */,
 				F69FEC8D2C3BEB7B00ACFC92 /* SCPlayer.c */,
-				F66486FE2B57CE220017426C /* SCRender.h */,
-				F66486FF2B57CE220017426C /* SCRender.mm */,
 				F692D1223020516600BFA21B /* SCPlayer_audio.h */,
 				F692D1233020516600BFA21B /* SCPlayer_audio.c */,
 				F692D11F3020515400BFA21B /* SCPlayer_video.h */,
 				F692D1203020515400BFA21B /* SCPlayer_video.c */,
 				F68C9BBD302C460500D98A6E /* SCPlayer_sync.h */,
 				F68C9BBE302C460500D98A6E /* SCPlayer_sync.c */,
+				F66486FE2B57CE220017426C /* SCRender.h */,
+				F66486FF2B57CE220017426C /* SCRender.mm */,
 				F6C7552B2C5CC2BD006EFCDF /* OCRender.h */,
 				F6C7552C2C5CC2BD006EFCDF /* OCRender.m */,
 				F6E4E52C303016300065FD5E /* SCPlayer_PLC.h */,
@@ -598,6 +598,10 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/SCPlayer_2D/libs",
 				);
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/SCPlayer_2D/libs/ffmpeglib/include",
 					"$(PROJECT_DIR)/SCPlayer_2D",
@@ -605,10 +609,6 @@
 				);
 				INFOPLIST_FILE = SCPlayer_2D/other/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 11.0;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -642,6 +642,10 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/SCPlayer_2D/libs",
 				);
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/SCPlayer_2D/libs/ffmpeglib/include",
 					"$(PROJECT_DIR)/SCPlayer_2D",
@@ -649,10 +653,6 @@
 				);
 				INFOPLIST_FILE = SCPlayer_2D/other/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 11.0;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					"HAVE_CONFIG_H=1",
-				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

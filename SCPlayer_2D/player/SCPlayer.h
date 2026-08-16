@@ -152,6 +152,7 @@ typedef struct SCPlayer{
     double          video_clock;//视频时钟（ms）
     double          video_current_pts;     //当前视频帧 pts（ms）
     double          video_current_pts_time;//记下该 pts 时的墙钟（ms）
+    int             hysteresis_samples;//音频播放速度,样本滞回
 
     // 音频
     int             audio_index;     //音频流的index

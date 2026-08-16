@@ -655,6 +655,7 @@ int stream_component_open(SCPlayer *scp,int stream_index){
             scp->audio_clock = NAN;
             scp->audio_frame_pts = NAN;
             scp->audio_compensation_pts = 0;
+            scp->hysteresis_samples = 1;
             scp->audio_st = st;
             scp->audio_index = stream_index;
             scp->audio_ctx = avctx;

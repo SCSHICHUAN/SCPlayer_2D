@@ -323,7 +323,6 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
     int wanted;
     double diff;
     double external;
-    int min_nb;
     int freq;
     
     if (!scp || nb_samples <= 0) {
@@ -339,21 +338,29 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
         return nb_samples;
     }
     
-    double audio_mb = scp->audioq.size / (1024.0 * 1024.0);
-    if (audio_mb <= 0.02) {
-        /* 约加快 10% */
-        min_nb = nb_samples * (100 - 10) / 100;
-    } else {
-        /* 积压更大：最多约 2×（atempo tempo 上限 2.0，对应少吐 50%） */
-        min_nb = nb_samples * (100 - 50) / 100;
+    /*
+     回置区间 [0.01 0.03] 不在灵界点来哈却换导致音频声音奇怪
+     如果队列小于0.01MB时就正常播放，一直保持这个速度让队列增长，
+     增长到0.03MB就开始加速让队列减少，一直保持这个速度让队列减少，
+     减少到0.01MB切回正常速度,
+     这里还可以优化,观察是否增长和减少
+     */
+    double audio_q_size = scp->audioq.size / (1024.0 * 1024.0);
+    if (audio_q_size <= 0.01) {// 小于0.01MB 就按照 正常的数度一直播
+        scp->hysteresis_samples = nb_samples; //正常播放 慢数度
+    } else if (audio_q_size >= 0.05){
+        scp->hysteresis_samples = nb_samples * (100 - 50) / 100; //加快50%,最大只能是2倍
+    } else if (audio_q_size >= 0.03) {// 小于0.03MB 就按照就一直加速播放
+        scp->hysteresis_samples = nb_samples * (100 - 10) / 100;//加快10%
     }
-    if (min_nb < 1) {
-        min_nb = 1;
+    
+    if (scp->hysteresis_samples < 1) {
+        scp->hysteresis_samples = 1;
     }
 
     
     /* 队列没消耗干净：直接最大加速 */
-    wanted = min_nb;
+    wanted = scp->hysteresis_samples;
 
     external = get_external_clock(scp);
     if (!isnan(external)) {
@@ -365,8 +372,8 @@ static int synchronize_audio_to_external(SCPlayer *scp, int nb_samples)
             if (by_diff < wanted) {
                 wanted = by_diff;
             }
-            if (wanted < min_nb) {
-                wanted = min_nb;
+            if (wanted < scp->hysteresis_samples) {
+                wanted = scp->hysteresis_samples;
             }
         }
     }
